@@ -29,11 +29,15 @@ def dar_premio(c, escenario, elegir=None):
         elif tipo_p == 1:
             c["exp"] += dato
         elif tipo_p == 2 and dato != NADA:
-            # un libro de habilidad llega SIN verificar (para eso está el Skill Check Scroll)
-            it = [dato, max(1, cant), libre_en_bolsa(inv), serial_nuevo(inv),
-                  0 if 31000 <= dato <= 33999 else 1]
-            inv.append(it)
-            nuevos.append(it)
+            try:
+                # un libro de habilidad llega SIN verificar (para eso está el Skill Check Scroll)
+                cas = libre_en_bolsa(inv)
+                it = [dato, max(1, cant), cas, serial_nuevo(inv),
+                      0 if 31000 <= dato <= 33999 else 1]
+                inv.append(it)
+                nuevos.append(it)
+            except StopIteration:
+                pass
     c["items"] = inv
     return nuevos
 
@@ -45,6 +49,10 @@ def game_over(c, p, conexion):
     p["game_over_en"] = None
     c["partidas"] += 1
     guardar(c)
+    s = SALAS.get(p.get("sala"))
+    if s:
+        s["jugando"] = False
+        s.setdefault("cargados", set()).clear()
     salida = struct.pack("<HHIBIHB", 1, c["monedas"], c["abandonos"], nivel(c["exp"]),
                          c["exp"], 0, 0)
     return [(0x1069, b"\x00", 0, conexion), (0x1075, salida, 6000, conexion)]
@@ -95,7 +103,7 @@ def termino_de_cargar(cmd, cuerpo, conexion, c, p):
 @maneja(0x1061)
 def npc_muerto(cmd, cuerpo, conexion, c, p):
     """un NPC muerto [§5.11]"""
-    p["muertos"] += 1
+    p["muertos"] = p.get("muertos", 0) + 1
     return []
 
 
@@ -103,7 +111,7 @@ def npc_muerto(cmd, cuerpo, conexion, c, p):
 def le_pegaron(cmd, cuerpo, conexion, c, p):
     """★ le pegaron (0x1063 C→S / 0x1062 S→C `0x547440`, aporte de Hysteria-xyz):
     Difunde la vida y maná actualizados al HUD de los compañeros de equipo."""
-    p["golpes"] += 1
+    p["golpes"] = p.get("golpes", 0) + 1
     s = SALAS.get(p.get("sala"))
     r = []
     if s and conexion in s["miembros"] and len(s["miembros"]) > 1:
@@ -224,9 +232,16 @@ def usar_moneda(cmd, cuerpo, conexion, c, p):
     si = len(cuerpo) >= 2 and cuerpo[1] == 1 and c["monedas"] > 0
     if si:
         c["monedas"] -= 1
-        p["revividas"] += 1
+        p["revividas"] = p.get("revividas", 0) + 1
         guardar(c)
     r = [(0x106B, struct.pack("<HBHB", 1, 1 if si else 0, c["monedas"], 0), 0)]
+    s = SALAS.get(p.get("sala"))
+    if si and s and conexion in s["miembros"] and len(s["miembros"]) > 1:
+        yo = s["miembros"].index(conexion)
+        msg_otro = struct.pack("<HBHB", 1, 2, c["monedas"], yo)
+        for m in s["miembros"]:
+            if m != conexion:
+                r.append((0x106B, msg_otro, 0, m))
     if not si:
         # «Cancel» o sin monedas: modo 0 = espectador (estado 0xA) → como el game over, al
         # lobby a los 6 s (🟡 con un solo jugador; con más, seguiría mirando)
@@ -240,13 +255,22 @@ def usar_moneda(cmd, cuerpo, conexion, c, p):
 @maneja(0x1064)
 def fin_de_stage(cmd, cuerpo, conexion, c, p):
     """★ la stage terminó [§5.13, §5.14]"""
-    ms = int((time.time() - (p["inicio"] or time.time())) * 1000)
+    inicio = p.get("inicio") or time.time()
+    ms = int((time.time() - inicio) * 1000)
     # ★ el premio sale del XML del escenario (RANK_POINT, KILL_POINT, TOTALEXP, MONSTER_CNT,
-    #   RANKRATE). 🟡 CÓMO los combinaba Softnyx no se sabe: acá, proporcional a los NPC muertos
-    rp, kp, te, mc = ESCENARIOS.get(p["escenario"], ESCENARIOS[1011])
-    frac = min(1.0, p["muertos"] / float(mc))
+    #   RANKRATE). Si no estaba en p, sale de la sala
+    esc = p.get("escenario")
+    if not esc:
+        s = SALAS.get(p.get("sala"))
+        if s and len(s["sala"]) >= 0x2A:
+            esc = struct.unpack_from("<H", s["sala"], 0x28)[0]
+    esc = esc or 1011
+    p["escenario"] = esc
+    rp, kp, te, mc = ESCENARIOS.get(esc, ESCENARIOS[1011])
+    muertos = p.get("muertos", 0)
+    frac = min(1.0, muertos / float(mc)) if mc > 0 else 1.0
     exp_ganada = max(1, int(round(te * frac)))
-    plata_ganada = 100 + 10 * p["muertos"]              # 🟡 la plata: inventada
+    plata_ganada = 100 + 10 * muertos              # 🟡 la plata: inventada
     rango_xml = next((5 - i for i, corte in enumerate(RANKRATE) if frac >= corte), 1)
     antes = nivel(c["exp"])
     c["exp"] += exp_ganada
@@ -270,12 +294,16 @@ def fin_de_stage(cmd, cuerpo, conexion, c, p):
     fin = (struct.pack("<HHIIHB", 1, c["monedas"], c["plata"], c["exp"], 0, n)
            + struct.pack("<IIBB", 0, p["escenario"], 1, 1) + bytes([len(nuevos), 0, 0])
            + regs + bytes([0]))
-    resultado = struct.pack("<IHHHIIB", 0, p["muertos"], p["golpes"], p["revividas"], ms,
-                            p["puntos"], rango)
+    resultado = struct.pack("<IHHHIIB", 0, muertos, p.get("golpes", 0), p.get("revividas", 0), ms,
+                            p.get("puntos", 0), rango)
     cartas = struct.pack("<IIII", 60000, *PRECIOS)
     p["cartas_hasta"] = time.time() + 8 + 60 + 2          # 0x106F a los 8 s + 60 s + margen
     p["exp_cartas"] = 0
     p["cartas_elegidas"] = set()
+    s = SALAS.get(p.get("sala"))
+    if s:
+        s["jugando"] = False
+        s.setdefault("cargados", set()).clear()
     if n > antes:
         print("sube de nivel", antes, "→", n)
     # ★ el resultado y las cartas ESPACIADOS (juntos, las cartas tapaban el resultado)
@@ -332,6 +360,10 @@ def salir_de_stage(cmd, cuerpo, conexion, c, p):
     c["abandonos"] += 1
     c["partidas"] += 1
     guardar(c)
+    s = SALAS.get(p.get("sala"))
+    if s:
+        s["jugando"] = False
+        s.setdefault("cargados", set()).clear()
     salida = struct.pack("<HHIBIHB", 1, c["monedas"], c["abandonos"], nivel(c["exp"]),
                          c["exp"], 0, 0)
     return [(0x1075, salida, 0)]
