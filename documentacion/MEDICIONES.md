@@ -2335,7 +2335,7 @@ CreateVertexBuffer del dispositivo y `WSAEventSelect` del exe (por su tabla de i
   **Resultado** (fotos): Arquer, ruimleon y rui, cada uno con su ropa en la selección y él mismo,
   con su set, en el lobby. 19 pruebas nuevas en `juego.py control`, con sus reveses.
 - 🟡 Falta: borrar personaje (el mensaje no se conoce), y que el primer personaje de una cuenta nueva
-  tome el apodo de R2Beat (el claim «nombre» del portero, ya listo en local en Chile).
+  tome el apodo de R2Beat (el claim «nombre» del portero, ya listo en local en Chile). ✅ El apodo: §54.
 - ★ **BORRAR personaje, MEDIDO** (El tester a mano, 12-nov 23:52): 0x1015 = `u32 id · u8 LUGAR`; el cliente
   espera 0x1016 (`0x544620`, lee 3 B: u16 resultado · u8 lugar; con 1 lo saca de su lista y redibuja).
   `personajes.borrar`: borró rui (lugar 0) y ruimleon (lugar 1); el último (Arquer) NO se borra (resultado
@@ -2431,3 +2431,75 @@ CreateVertexBuffer del dispositivo y `WSAEventSelect` del exe (por su tabla de i
 - 🟡 **Pendiente**: si los DOS tienen un NAT que cambia el puerto según el destino (simétrico), el
   saludo no entra y la sala queda en -1000 (antes, por el relay, andaba). El arreglo va en la dll: si no
   llega nada del par en unos segundos, pasarse sola al relay (o probar puertos cercanos).
+
+### 54 · El APODO de R2Beat como nombre del personaje (12-nov, prod)
+
+- **Lo que llegó**: el portero de R2Beat manda (desde el 12-nov, a pedido del dueño del proyecto) un
+  claim opcional `nombre` en el pase: el apodo del personaje del casillero 1 de R2Beat, nunca el login.
+- **El arreglo** (PR #23 → #24, prod `3d01bc3`): `porteria.nombre_del_pase` lo valida como al crear
+  personaje (`[A-Za-z0-9_]{2,12}`, recortado a 12) y lo guarda con el ticket (columna `nombre`; la base
+  vieja se actualiza sola, probado con una del esquema anterior). Al entrar, `personajes.bautizar` se lo
+  pone al personaje SIN nombre propio (el que se veía `r2b_<uid>`), sólo si nadie más lo usa; nunca
+  renombra a uno que ya tiene. Pruebas en `pruebas_login` con sus reveses (el ticket de otra cuenta, el
+  mismo nombre con otras mayúsculas, espacio / ñ, uno que ya tiene nombre).
+- ★ **Medido en prod** (una cuenta real por el launcher): el registro dice «su personaje toma el nombre del
+  pase»; en la cuenta, el personaje del casillero 1 pasó de `r2b_<uid>` al apodo y el del 2 (que ya tenía
+  nombre propio) quedó igual; después, sala, partida y salida sin errores.
+
+### 55 · El estado del DESEMPACADO, contado (13-nov): qué falta para el exe sin ASProtect
+
+- **Las versiones coinciden**: `EDA_limpio.exe` md5 `0799387e…` es el mismo en `_trabajo/juego/`, en el
+  repo público (`exe/`) y en prod (el registro del server: «clave: EDA_limpio.exe (0799387e)»).
+- `contar_piezas.py`: **47/62 mensajes** (el README decía 46 y LEEME.md 41: corregidos) y **511/694
+  llamadas** resueltas = **183 trampas**. Por zona: 61 en TABLAS DE SALTOS (`jmp dword [IAT]` cada 6
+  bytes, en `0x741FE2…0x742420` y `0x859084…0x859330`), 69 en la CRT (`0x7C…0x7F`), 25 en el motor
+  (`0x72…0x78`), 15 en el juego (`0x56…0x6C`) y 13 sueltas en `0x859…`.
+- ★ **Las tablas de saltos no las usa nadie**: ninguna llamada directa (`call`/`jmp rel32`, 0 a cada
+  entrada, también a las sanas) y ningún puntero a una entrada desde afuera de la tabla (los 4–5 que
+  aparecen caen en medio de una instrucción o pasado el final). 🟡 Deducción: código muerto de una
+  biblioteca enlazada; sus trampas no se alcanzan jugando.
+- ⚠ **Un detalle del desempacado**: `desempacar.py construir` repone SIEMPRE `FF 15` (`call [x]`). En
+  esas tablas el original era `FF 25` (`jmp [x]`): hay **8** entradas repuestas como `call` (p. ej.
+  `0x742048` lstrlenA, `0x8590C0` GetSystemDirectoryA). Como nadie las llama, no hace daño hoy; si
+  alguna vez se alcanzaran, la API recibiría los argumentos corridos. Arreglo: en `construir`, si el
+  sitio está entre `FF 25`, escribir `FF 25`.
+- ⛔ **El casillero de una trampa de tabla NO sale de los vecinos**: la tabla no está en orden (deducir
+  «−4 por cada 6 bytes» dio casilleros REPETIDOS: `0x88A208` dos veces, `0x88A2E8` dos veces). Hay que
+  sacarlo de otra forma (el stub de ASProtect, `emular_stub.py`, o los casilleros que no tienen salto).
+
+### 56 · ★★★ EL EXE SIN ASPROTECT: 624/694, y las 70 trampas que quedan son código muerto (13-nov)
+
+- **Lo que hay**: `_trabajo/exe_nuevo/EDA_limpio.exe` (md5 `ba6f91db…`; el libre `EDA_libre.exe` al lado).
+  ⛔ **Prod, el launcher y `_trabajo/juego/` siguen con `0799387e`** hasta que el dueño avise el cambio
+  (cada exe nuevo cambia la clave del Broker). El exe de hoy, respaldado en `_trabajo/respaldo_exe_0799387e/`.
+- **El control del rearmado**: desde el volcado, `juntar_apis` + `desempacar construir` + `sin_gameguard
+  limpio` dan EXACTAMENTE `6bb0d9a9` / `0799387e` (los de hoy). Recién con eso se cambió algo.
+- **Cómo se llegó** (todo en `documentacion/APIS_A_MANO.md`, cada fila con su prueba):
+  1. **`herramientas/gemelas_crt.py`**: la CRT del exe (VC 7.1, firma «Rich» build 3077) contra su gemela
+     `msvcr71.dll` (la que traen los clientes de R2Beat 2013): las 10 instrucciones de antes y las 8 de
+     después, sin direcciones. Control: coincide en 179 de 184 sitios ya resueltos que juzga y no le
+     encuentra gemela a ninguna de 200 llamadas del juego. → 19 trampas.
+  2. **La medición del stub** (`_trabajo/exe_nuevo/ayudas/medir_trampas.py` → `medidas.json`): emulando el
+     stub de ASProtect de cada trampa, la función de la DLL donde corre el último bloque antes de volver
+     y lo que devuelve (ids de proceso 0x8268 / hilo 0x7E84 / página OEM 949 del volcado). ⚠ Una PISTA:
+     los «bytes de argumento» a veces son basura (WriteFile daba 124).
+  3. **Leyendo el código** sitio por sitio (tres revisiones en paralelo + verificación): cadenas que el
+     juego descifra con `0x7D9360`, constantes (HKLM, KEY_ALL_ACCESS, −2/−3/−4 de `getSystemCP`), los
+     argumentos que se empujan, llamadas vecinas ya resueltas. → 94 trampas.
+- ★★ **10 llamadas del exe de HOY estaban MAL resueltas** (el método automático había elegido una función
+  interna de ntdll/kernelbase): `RegOpenKeyExA` ×3 (`0x5DB033`, `0x7D48CB`, `0x7D4A53`; decía
+  RtlCreateUnicodeStringFromAsciiz, 2 argumentos en vez de 5), `SetThreadPriority` ×3 (TpCaptureCaller),
+  `CryptVerifySignatureA` (`0x7D79B9`, el reintento), `GetDriveTypeA` (`0x7E3789`, decía LoadLibraryA),
+  `IsValidCodePage` (`0x7F4610`, RtlIntegerToChar de 4) y `SetConsoleCtrlHandler` (`0x7F48D5`). Las de
+  cantidad de argumentos distinta corren la pila si se alcanzan.
+- ★ **Funciones de UNA instrucción** (`jmp [API]`, la llamada de cola): `_getpid` (`0x7F525A`, la llama
+  `tmpnam`), `__threadid`, `__threadhandle`. Repuestas como `call`, la API volvía al comienzo de la
+  función siguiente. `desempacar.SALTOS_A_MANO`. Y las 56 entradas de las tablas de saltos, como `jmp`.
+- **Lo que queda (70)**: las 69 de las dos tablas de saltos que nadie llama (§55; ningún método da su
+  casillero con seguridad) y `0x7CE9AF` (NPGameLib: el parche `limpio` deja `xor eax,eax; ret` en
+  `0x7CE890`). Ninguna se alcanza: **el exe ya no tiene trampas en código vivo**.
+- **Medido con el piloto** (server local): lista → login → SELECT CHARACTER → lobby → sala → partida
+  (HUD, minimapa, reloj corriendo), sin excepciones en la caja negra. ⚠ El ESC del piloto para salir no
+  anda con NINGUNO de los dos exes (control al revés hecho con `0799387e`): es el piloto, no el exe.
+- ⏭ Falta: la prueba a mano del dueño (habilidades, tienda, refinería, dos jugadores) y, cuando él
+  diga, la mudanza (exe en el launcher + su clave en el server).
