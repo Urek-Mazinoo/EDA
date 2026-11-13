@@ -9,6 +9,8 @@
 #   · /eda/*        → el login (POST /eda/pase) del server de prod, en 127.0.0.1:PUERTO_HTTP (25901)
 #   · /files-eda/*  → el cliente para repartir (/opt/eda/files-eda/<release>-<azar>/…), con caché de
 #                     un año: la dirección lleva la versión, el contenido de una dirección no cambia
+#   · /eda/manifiesto.jws → el manifiesto FIRMADO para el launcher (/opt/eda/manifiesto/manifiesto.jws),
+#                     sin caché (herramientas/firmar_manifiesto.py)
 #   · lo demás      → 404
 # El certificado: el de ORIGEN de Cloudflare en /etc/caddy/origen/origen.pem + origen.key (la clave
 # se generó en el VPS y no sale de ahí). Con él, Cloudflare puede ir en «Full (strict)».
@@ -56,6 +58,15 @@ $DOMINIO {
 	route {
 		@no_cf not remote_ip $RANGOS
 		respond @no_cf "solo por Cloudflare" 403
+		# ★ (13-nov) el manifiesto FIRMADO del cliente, para el launcher: SIN caché (si quedara viejo en el
+		#   borde, nadie vería la versión nueva). Va antes que /eda/*, que es del server
+		handle /eda/manifiesto.jws {
+			header Cache-Control "no-store"
+			header Content-Type "application/jose"
+			root * /opt/eda/manifiesto
+			rewrite * /manifiesto.jws
+			file_server
+		}
 		reverse_proxy /eda/* 127.0.0.1:$HTTP
 		header /files-eda/* Cache-Control "public, max-age=31536000, immutable"
 		file_server /files-eda/* {
