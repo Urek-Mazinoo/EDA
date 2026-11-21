@@ -1,0 +1,22 @@
+{
+ "dll_candidata": "4065e9232127509882ece90279e0983e (commit 8c36400, rama local punto6/graficos) — sin aprobar",
+ "referencias": [
+  "ba078f3f (Punto 5, 5/5 en TEST)",
+  "d617fb02 (Punto 6, 6/7)",
+  "ba1e861b (estable en uso)"
+ ],
+ "proximo": "Cuelgue al cambiar resolución en vivo después de un Stage (Reset → INVALIDCALL y RestartRender).",
+ "aprobado": [
+  "Cambio de resolución en vivo sin Stage previo (1920→800→1280→1920), d617fb02 y 4065e923",
+  "Brillo, perfiles Bajo/Máximo, destello rojo quitado, Exit Game/botones de arriba (d617fb02)",
+  "HUD, minimapa, REWARD/AWARD, Options, Messenger a 1920 (4065e923, server local)",
+  "Capítulos/Misiones completo y centrado a 1920 y 1280 (4065e923)"
+ ],
+ "pendiente": [
+  "Cuelgue: Stage con habilidades → lobby/Shop → cambio en vivo (también en d617fb02)",
+  "Distorsión del aura de la espada (no reproducida en el server local)",
+  "Close de Capítulos a 1920 pantalla completa (zona arriba a la derecha: overlay)",
+  "Letras: rótulos de botones/encabezados son imágenes 800×600 agrandadas ×1,8 (sin cambio)",
+  "Prueba visual de 4065e923 por el dueño"
+ ]
+}

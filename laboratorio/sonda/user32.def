@@ -1,0 +1,10 @@
+LIBRARY user32.dll
+EXPORTS
+RegisterClassA@4
+CreateWindowExA@48
+ShowWindow@8
+DefWindowProcA@16
+PeekMessageA@20
+TranslateMessage@4
+DispatchMessageA@4
+wsprintfA

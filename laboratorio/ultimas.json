@@ -1,0 +1,82 @@
+{
+ "canal": {
+  "commit": "65cb769",
+  "detalle": "→ TODO BIEN",
+  "donde": "nube (vm)",
+  "estado": "bien",
+  "fecha": "2026-11-20 11:52:22",
+  "segundos": 0.1
+ },
+ "dll": {
+  "commit": "65cb769",
+  "detalle": "falta zig",
+  "donde": "nube (vm)",
+  "estado": "omitida",
+  "fecha": "2026-11-20 11:52:22",
+  "segundos": 0.0
+ },
+ "escala2d": {
+  "commit": "65cb769",
+  "detalle": "76 bien · 0 mal",
+  "donde": "nube (vm)",
+  "estado": "bien",
+  "fecha": "2026-11-20 11:52:22",
+  "segundos": 0.4
+ },
+ "graficos": {
+  "commit": "65cb769",
+  "detalle": "62 bien · 0 mal",
+  "donde": "nube (vm)",
+  "estado": "bien",
+  "fecha": "2026-11-20 11:52:22",
+  "segundos": 0.5
+ },
+ "piezas": {
+  "commit": "65cb769",
+  "detalle": "falta pycryptodome",
+  "donde": "nube (vm)",
+  "estado": "omitida",
+  "fecha": "2026-11-20 11:52:22",
+  "segundos": 0.1
+ },
+ "relay": {
+  "commit": "65cb769",
+  "detalle": "→ TODO BIEN",
+  "donde": "nube (vm)",
+  "estado": "bien",
+  "fecha": "2026-11-20 11:52:22",
+  "segundos": 0.0
+ },
+ "server": {
+  "commit": "65cb769",
+  "detalle": "falta pycryptodome",
+  "donde": "nube (vm)",
+  "estado": "omitida",
+  "fecha": "2026-11-20 11:52:22",
+  "segundos": 0.0
+ },
+ "sonda": {
+  "commit": "65cb769",
+  "detalle": "compilada (no ejecutada: falta Windows) · md5 2584294e",
+  "donde": "nube (vm)",
+  "estado": "bien",
+  "fecha": "2026-11-20 11:52:22",
+  "segundos": 0.5
+ },
+ "teclas": {
+  "commit": "65cb769",
+  "detalle": "código 0",
+  "donde": "nube (vm)",
+  "estado": "bien",
+  "fecha": "2026-11-20 11:52:22",
+  "segundos": 0.1
+ },
+ "version": {
+  "commit": "65cb769",
+  "detalle": "prueba_version.py: 34 bien · 0 mal",
+  "donde": "nube (vm)",
+  "estado": "bien",
+  "fecha": "2026-11-20 11:52:22",
+  "segundos": 0.7
+ }
+}

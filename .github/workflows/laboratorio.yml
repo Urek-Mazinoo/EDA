@@ -1,0 +1,101 @@
+# ★ EL LABORATORIO (20-nov): compilar y probar FUERA de la PC del dueño. Sólo ramas lab/** y a mano (workflow_dispatch):
+#   nunca en develop/main, nunca publica nada (sin releases, sin etiquetas, permisos de sólo lectura).
+#   1. «linux»: la regresión de laboratorio/lab.py (pruebas en C, server, relay, piezas, la dll con zig DOS veces, la
+#      sonda de Direct3D9) → artefacto «laboratorio-<run>» con la dll, su md5, los registros y ESTADO.md.
+#   2. «windows»: EXPERIMENTO. La sonda de Direct3D9 en windows-latest (sin placa: WARP / adaptador básico), primero con
+#      el d3d9 de Windows y después con NUESTRA dll al lado. Contesta si en esa máquina hay Direct3D9, si aparece la
+#      «raya» de las letras sueltas con WRAP (y si la dll la quita) y qué da un Reset con un render target vivo.
+#      No prueba el juego: el cliente real necesita sus datos, que no están en el repo.
+name: laboratorio
+
+on:
+  push:
+    branches: ["lab/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: laboratorio-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install "pycryptodome==3.24.1"
+      - name: Zig 0.16.0 (la receta del repo)
+        run: |
+          curl -sSfL https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz | tar -xJ
+          echo "$PWD/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+      - name: clang + lld (para la sonda)
+        run: sudo apt-get install -y -qq clang lld llvm > /dev/null
+      - name: la regresión
+        run: python3 laboratorio/lab.py regresion
+      - name: resumen
+        if: always()
+        run: |
+          cat laboratorio/ESTADO.md >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p salida
+          cp -r laboratorio/resultados salida/ 2>/dev/null || true
+          cp laboratorio/ESTADO.md laboratorio/ultimas.json salida/
+          cp herramientas/dll_d3d9/d3d9.dll salida/ 2>/dev/null && md5sum salida/d3d9.dll > salida/d3d9.dll.md5 || true
+          cp "$RUNNER_TEMP/sonda.exe" salida/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: laboratorio-${{ github.run_number }}
+          path: salida
+          retention-days: 30
+
+  windows:
+    needs: linux
+    runs-on: windows-latest
+    timeout-minutes: 10
+    continue-on-error: true            # (experimento: si Direct3D9 no anda en esta máquina, no tapa lo de Linux)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: laboratorio
+      - uses: actions/download-artifact@v4
+        with:
+          name: laboratorio-${{ github.run_number }}
+          path: lab
+      - name: la sonda con el Direct3D9 de Windows y con nuestra dll
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force sis, prx | Out-Null
+          Copy-Item lab/sonda.exe sis/; Copy-Item lab/sonda.exe prx/
+          Copy-Item lab/d3d9.dll prx/; Copy-Item laboratorio/sonda/eda_d3d9.ini prx/
+          Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion | Format-Table | Out-String | Tee-Object -FilePath sis/adaptador.txt
+          foreach ($m in @(@("sis","sistema"), @("prx","proxy"))) {
+            Push-Location $m[0]
+            $p = Start-Process -FilePath .\sonda.exe -ArgumentList $m[1], ("sonda-" + $m[1]) -PassThru
+            if (-not $p.WaitForExit(60000)) { $p.Kill(); "colgada (60 s)" | Out-File ("sonda-" + $m[1] + ".txt") }
+            "salida: $($p.ExitCode)" | Out-File -Append ("sonda-" + $m[1] + ".txt")
+            Pop-Location
+          }
+          "### Sonda Direct3D9 (windows-latest)" >> $env:GITHUB_STEP_SUMMARY
+          foreach ($f in @("sis/sonda-sistema.json", "prx/sonda-proxy.json")) {
+            '```' >> $env:GITHUB_STEP_SUMMARY
+            if (Test-Path $f) { Get-Content $f >> $env:GITHUB_STEP_SUMMARY } else { "sin $f" >> $env:GITHUB_STEP_SUMMARY }
+            '```' >> $env:GITHUB_STEP_SUMMARY
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sonda-windows-${{ github.run_number }}
+          path: |
+            sis
+            prx
+          retention-days: 30
