@@ -507,6 +507,8 @@ enum { I_RESET = 16, I_PRESENT = 17, I_BEGINSCENE = 41, I_ENDSCENE = 42, I_SETRS
 
 static M_PRESENT g_present_real;
 static M_RESET g_reset_real;
+static M_RESET g_reset_orig;          /* ★ (24-nov) el Reset de d3d9.dll (el primero que se vio, antes que otro programa) */
+static volatile LONG g_reset_dentro;  /* ★ (24-nov) 1 = ya estamos adentro de mi_reset (ver mi_reset) */
 static M_CREARDEV g_creardev_real;
 static void *g_bloque;          /* el state block del contador (D3DSBT_ALL) */
 static void *g_bloque_dev;      /* …y el dispositivo al que pertenece */
@@ -2294,7 +2296,7 @@ static void pan_monitor_actual(HWND foco, int *mw, int *mh)
     *mh = GetSystemMetrics(SM_CYSCREEN);
 }
 
-static long WINAPI mi_reset(void *dev, void *pp)
+static long WINAPI mi_reset_cuerpo(void *dev, void *pp)
 {
     if (g_bloque) {
         if (g_bloque_dev == dev)
@@ -2332,6 +2334,28 @@ static long WINAPI mi_reset(void *dev, void *pp)
         apuntar("  ★ Reset: %s%d del pool DEFAULT seguían puestos y se sacaron antes:%s%s", g_gr_desligar ? "" : "(reset_desligar=0: NO se sacan) ",
                 puestos, puestos_diag[0] ? puestos_diag : " ninguno",
                 hr ? " · ⚠ igual FALLÓ: algún dueño todavía tiene un recurso DEFAULT (o un state block / swap chain extra)" : "");
+    return hr;
+}
+
+/* ★ (24-nov) EL RESET EN CÍRCULO — medido en esta PC (24-nov 17:45, 0.5.5; y en TEST el 23-nov 11:30, 0.5.4): otro programa
+ *   (un overlay: NVIDIA, Discord, Steam…) se engancha ENCIMA del nuestro en la tabla del dispositivo, y su «original» es mi_reset.
+ *   reafirmar_ganchos nos vuelve a poner arriba y guarda el suyo como g_reset_real → mi_reset → el suyo → mi_reset → … El cambio
+ *   de resolución en vivo nunca volvía: la ventana se agrandaba y la imagen seguía en 800×600, colgada. Ahora, si mi_reset se
+ *   llama a sí mismo (el otro programa nos devuelve la llamada), esa vuelta va DIRECTO al Reset de d3d9.dll: el otro programa
+ *   igual ve el Reset (queda en el medio) y nuestro trabajo se hace una sola vez. */
+static long WINAPI mi_reset(void *dev, void *pp)
+{
+    if (InterlockedCompareExchange(&g_reset_dentro, 1, 0) != 0) {
+        static LONG avisos;
+        M_RESET directo = g_reset_orig ? g_reset_orig : g_reset_real;
+        if (InterlockedIncrement(&avisos) <= 5)
+            apuntar("  ★ Reset en círculo (otro programa nos devuelve la llamada): directo al d3d9 (0x%08lX)",
+                    (unsigned long)(ULONG_PTR)directo);
+        if (!directo || directo == (M_RESET)mi_reset) return (long)0x8876086C;   /* (D3DERR_INVALIDCALL: nunca en círculo) */
+        return directo(dev, pp);
+    }
+    long hr = mi_reset_cuerpo(dev, pp);
+    InterlockedExchange(&g_reset_dentro, 0);
     return hr;
 }
 
@@ -2387,6 +2411,7 @@ static long WINAPI mi_crear_dispositivo(void *d3d, UINT adaptador, DWORD tipo, H
         g_vt_dev = vt;
         poner(vt, I_PRESENT, (void *)mi_present, (void **)&g_present_real);
         poner(vt, I_RESET, (void *)mi_reset, (void **)&g_reset_real);
+        if (!g_reset_orig && g_reset_real && g_reset_real != (M_RESET)mi_reset) g_reset_orig = g_reset_real;
         if (g_buferes) {
             poner(vt, 26 /* CreateVertexBuffer */, (void *)mi_crear_vb, (void **)&g_cvb_real);
             poner(vt, 100 /* SetStreamSource */, (void *)mi_sss, (void **)&g_sss_real);
@@ -2554,8 +2579,15 @@ static int reafirmar(void **vt, int i, void *nuestro, void **real, const char *q
     vt[i] = nuestro;
     VirtualProtect(&vt[i], sizeof(void *), prot, &prot);
     static LONG avisos;                                  /* (si otro programa peleara cada cuadro: el registro no se llena) */
-    if (InterlockedIncrement(&avisos) <= 60)
-        apuntar("  ⚠ otro programa pisó el gancho de %s (0x%08lX): encadenado, el nuestro vuelve", que, (unsigned long)(ULONG_PTR)ahora);
+    {
+        HMODULE m = NULL;
+        char quien[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)ahora, &m) && m)
+            GetModuleFileNameA(m, quien, sizeof(quien));
+        if (InterlockedIncrement(&avisos) <= 60)
+            apuntar("  ⚠ otro programa pisó el gancho de %s (0x%08lX, %s): encadenado, el nuestro vuelve", que,
+                    (unsigned long)(ULONG_PTR)ahora, quien);
+    }
     {
         static LONG listados;
         if (g_diagnostico && InterlockedIncrement(&listados) == 1) modulos_listar();
