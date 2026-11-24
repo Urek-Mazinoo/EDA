@@ -79,6 +79,15 @@ static void prueba_evento(void)
     OK(!strcmp(l, "{\"t\":1,\"m\":2,\"e\":\"malo\"}"), "nombre limpio: %s", l);
     char chico[16];
     OK(dg_evento(chico, sizeof(chico), 1, 2, "largo", NULL) == 0, "si no entra, no se arma a medias");
+    char ex[192];
+    int ne = dg_pantalla_extra(ex, (int)sizeof(ex), "reset", 1920, 1080, 1, 3840, 2160, 0, "personalizado", 0x8876086CUL, "sin_aa+tamano_bueno");
+    OK(ne > 0, "pantalla extra entra (%d B)", ne);
+    int nl = dg_evento(l, (int)sizeof(l), 1763740000000ULL, 1234567, "pantalla", ex);
+    OK(nl > 0 && nl < DG_LARGO && strstr(l, "\"e\":\"pantalla\"") && strstr(l, "\"origen\":\"reset\"")
+       && strstr(l, "\"w\":1920,\"h\":1080") && strstr(l, "\"modo\":\"completa\"")
+       && strstr(l, "\"mon_w\":3840,\"mon_h\":2160") && strstr(l, "\"aa\":0")
+       && strstr(l, "\"perfil\":\"personalizado\"") && strstr(l, "\"hr\":\"0x8876086C\"")
+       && strstr(l, "\"plan_b\":\"sin_aa+tamano_bueno\""), "evento pantalla completo: %s", l);
 }
 
 static void prueba_cola(void)
@@ -204,7 +213,10 @@ int main(int argc, char **argv)
     }
     if (argc == 2 && !strcmp(argv[1], "eventos")) {                    /* las formas que arma eda_diag.c */
         static const char *ej[][2] = {
-            {"inicio", ",\"version\":\"0.5.1\",\"build\":\"b73d820cc5d\""}, {"escena", ",\"vt\":\"0x00899670\""},
+            {"inicio", ",\"version\":\"0.5.5\",\"build\":\"b73d820cc5d\""},
+            {"pantalla", ",\"origen\":\"crear\",\"w\":1920,\"h\":1080,\"modo\":\"completa\",\"mon_w\":2560,\"mon_h\":1440,\"aa\":2,\"perfil\":\"alto\",\"hr\":\"0x00000000\",\"plan_b\":\"ninguno\""},
+            {"pantalla", ",\"origen\":\"reset\",\"w\":1280,\"h\":720,\"modo\":\"ventana\",\"mon_w\":2560,\"mon_h\":1440,\"aa\":0,\"perfil\":\"alto\",\"hr\":\"0x00000000\",\"plan_b\":\"sin_aa+tamano_bueno\""},
+            {"escena", ",\"vt\":\"0x00899670\""},
             {"congelado", ",\"ms\":2500,\"vt\":\"0x00899670\""}, {"atrapado", ",\"vt\":\"0x00899670\""},
             {"fps", ",\"fps\":60"}, {"foco", ",\"activo\":0"}, {"server_conecta", ",\"n\":1"},
             {"caida", ",\"codigo\":\"0xC0000005\",\"sitio\":\"0x007F4626\",\"modulo\":\"sin_resolver\""},

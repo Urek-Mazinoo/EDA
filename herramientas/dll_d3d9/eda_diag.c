@@ -149,6 +149,14 @@ static void dg_fps(int fps)
     dg_anotar("fps", ex);
 }
 
+static void dg_pantalla(const char *origen, int w, int h, int completa, int mon_w, int mon_h,
+                        int aa, const char *perfil, unsigned long hr, const char *plan_b)
+{
+    char ex[192];
+    if (dg_pantalla_extra(ex, (int)sizeof(ex), origen, w, h, completa, mon_w, mon_h, aa, perfil, hr, plan_b))
+        dg_anotar("pantalla", ex);
+}
+
 /* ── el envío (sólo el hilo) ─────────────────────────────────────────────────────────────────────────── */
 typedef void *HINET;
 typedef HINET (WINAPI *W_OPEN)(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD);

@@ -1318,7 +1318,7 @@ static void barra_xy(HWND h, int x, int y, const char *por, int ya800)
     BYTE *esc = leer_ptr((void *)0x934554);
     int pc = pantalla_costado(esc);
     RECT r;
-    if (!ya800 && e2d_activa()) e2d_ventana_a_ui(h, &x, &y);           /* ★ (Punto 5) la interfaz escalada */
+    if (!ya800 && e2d_raton()) e2d_ventana_a_ui(h, &x, &y);            /* ★ (Punto 5 / 24-nov) la interfaz escalada / estirada */
     else if (!ya800 && GetClientRect(h, &r) && r.right > 0 && r.bottom > 0) {   /* (en la pantalla de 800×600) */
         x = x * 800 / r.right;
         y = y * 600 / r.bottom;
@@ -1492,7 +1492,7 @@ static void cursor_juego_esconder(const char *quien)
      *   panel: el salto que se veía al abrir). En pantalla completa el juego tiene el mouse de Windows en SU 800×600
      *   (sin escalar) y el dibujo estirado: se lo pone en el punto estirado ANTES de que la flecha se vea. */
     RECT r;
-    if (e2d_activa() && g_ventana_juego) {                  /* ★ (Punto 5) la interfaz escalada y centrada */
+    if (e2d_raton() && g_ventana_juego) {                    /* ★ (Punto 5 / 24-nov) cliente ↔ backbuffer ↔ interfaz */
         POINT s = {x, y};
         e2d_ui_a_ventana(g_ventana_juego, (int *)&s.x, (int *)&s.y);
         if (ClientToScreen(g_ventana_juego, &s)) SetCursorPos(s.x, s.y);
@@ -2279,6 +2279,21 @@ static long WINAPI mi_present(void *dev, const RECT *a, const RECT *b, HWND w, c
     return hr;
 }
 
+static void pan_monitor_actual(HWND foco, int *mw, int *mh)
+{
+    *mw = 0; *mh = 0;
+    HWND v = foco ? foco : g_ventana_juego;
+    MONITORINFO mi = {sizeof(mi)};
+    if (v && GetMonitorInfoW(MonitorFromWindow(v, MONITOR_DEFAULTTONEAREST), &mi)) {
+        *mw = mi.rcMonitor.right - mi.rcMonitor.left;
+        *mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        if (*mw > 0 && *mh > 0) return;
+    }
+    if (mon_nativa(g_pantalla_monitor, mw, mh)) return;
+    *mw = GetSystemMetrics(SM_CXSCREEN);
+    *mh = GetSystemMetrics(SM_CYSCREEN);
+}
+
 static long WINAPI mi_reset(void *dev, void *pp)
 {
     if (g_bloque) {
@@ -2290,17 +2305,29 @@ static long WINAPI mi_reset(void *dev, void *pp)
     gr_soltar();                                             /* (el state block del brillo) */
     sombras_olvidar();
     ajustar_pp(pp);
-    gr_ajustar_pp(pp);                                       /* ★ (Punto 6) el antialias */
-    e2d_dispositivo(NULL, pp);                               /* ★ (Punto 5) el tamaño nuevo (si escala2d) */
+    gr_ajustar_pp(pp);                                       /* ★ (Punto 6 / 24-nov) el antialias (0 si > 1920×1080) */
     /* ★ (20-nov) lo que quedó PUESTO (texturas por etapa, streams, índices, destinos) se saca antes: si no, un recurso del
      *   pool DEFAULT ya soltado por su dueño sigue vivo y el Reset da 0x8876086C (el cierre tras un Stage; ver
      *   gr_reset_desligar). El Reset deja todo sin poner igual: para el motor es lo mismo. */
-    char puestos_diag[400];
+    char puestos_diag[400], plan_b[32];
     int puestos = 0;
     puestos_diag[0] = 0;
     if (g_gr_desligar) puestos = gr_reset_desligar(dev, (void *)g_sss_real, (void *)g_e2d_rt_real, puestos_diag, sizeof(puestos_diag));
-    long hr = g_reset_real(dev, pp);
-    apuntar("Reset -> 0x%08lx", (unsigned long)hr);
+    long hr = gr_reset_plan_b(dev, pp, g_reset_real, g_ini, plan_b, (int)sizeof(plan_b));
+    if (hr == 0) {
+        e2d_dispositivo(NULL, pp);                           /* ★ (24-nov) escalador y medición con el tamaño REAL */
+        if (pp && strstr(plan_b, "tamano_bueno")) {
+            g_res_w = (int)((DWORD *)pp)[0];
+            g_res_h = (int)((DWORD *)pp)[1];
+        }
+    }
+    {
+        int mw = 0, mh = 0;
+        int bw = pp ? (int)((DWORD *)pp)[0] : g_e2d_w, bh = pp ? (int)((DWORD *)pp)[1] : g_e2d_h;
+        pan_monitor_actual(NULL, &mw, &mh);
+        dg_pantalla("reset", bw, bh, g_sin_bordes || g_pantalla_pedida == 1, mw, mh,
+                    g_gr_aa_puesto > 0 ? g_gr_aa_puesto : 0, GR_PERFILES[g_gr_perfil], (unsigned long)hr, plan_b);
+    }
     if (puestos || hr)
         apuntar("  ★ Reset: %s%d del pool DEFAULT seguían puestos y se sacaron antes:%s%s", g_gr_desligar ? "" : "(reset_desligar=0: NO se sacan) ",
                 puestos, puestos_diag[0] ? puestos_diag : " ninguno",
@@ -2326,20 +2353,36 @@ static long WINAPI mi_crear_dispositivo(void *d3d, UINT adaptador, DWORD tipo, H
     g_gr_adaptador = adaptador;
     gr_placa(d3d, adaptador);
     gr_ajustar_pp(pp);
+    const char *plan_b = "ninguno";
     long hr = g_creardev_real(d3d, adaptador, tipo, foco, flags, pp, dev);
     if (hr != 0 && g_gr_aa_puesto > 0) {                     /* (con antialias no se pudo: sin él, como siempre) */
-        int pedido = g_gr_aa;
         apuntar("  (gráficos) ⚠ CreateDevice con antialias %d× → 0x%08lx: otra vez SIN antialias", g_gr_aa_puesto, (unsigned long)hr);
         g_gr_aa = 0;
-        gr_ajustar_pp(pp);
-        g_gr_aa = pedido;
         g_gr_aa_max = 0;                                     /* (no se vuelve a intentar en esta sesión) */
+        gr_ajustar_pp(pp);
         hr = g_creardev_real(d3d, adaptador, tipo, foco, flags, pp, dev);
+        if (hr == 0) {
+            plan_b = "sin_aa";
+            if (g_ini[0]) WritePrivateProfileStringA("graficos", "antialias", "0", g_ini);
+        } else {
+            plan_b = "fallo";
+        }
+    } else if (hr != 0) {
+        plan_b = "fallo";
     }
-    apuntar("CreateDevice(adaptador %u, flags 0x%lx, swap %lu, pflags 0x%lx, intervalo 0x%lx) -> 0x%08lx",
-            adaptador, (unsigned long)flags, (unsigned long)((DWORD *)pp)[6], (unsigned long)((DWORD *)pp)[11],
+    apuntar("CreateDevice(adaptador %u, %lux%lu, flags 0x%lx, swap %lu, pflags 0x%lx, intervalo 0x%lx) -> 0x%08lx",
+            adaptador, pp ? (unsigned long)((DWORD *)pp)[0] : 0ul, pp ? (unsigned long)((DWORD *)pp)[1] : 0ul,
+            (unsigned long)flags, (unsigned long)((DWORD *)pp)[6], (unsigned long)((DWORD *)pp)[11],
             (unsigned long)((DWORD *)pp)[13], (unsigned long)hr);
+    {
+        int mw = 0, mh = 0;
+        int bw = pp ? (int)((DWORD *)pp)[0] : g_res_w, bh = pp ? (int)((DWORD *)pp)[1] : g_res_h;
+        pan_monitor_actual(foco, &mw, &mh);
+        dg_pantalla("crear", bw, bh, g_sin_bordes || g_pantalla_pedida == 1, mw, mh,
+                    g_gr_aa_puesto > 0 ? g_gr_aa_puesto : 0, GR_PERFILES[g_gr_perfil], (unsigned long)hr, plan_b);
+    }
     if (hr == 0 && dev && *dev) {
+        gr_anotar_bueno(pp);                                 /* ★ (24-nov) último tamaño bueno para plan B de Reset */
         void **vt = VT(*dev);
         g_vt_dev = vt;
         poner(vt, I_PRESENT, (void *)mi_present, (void **)&g_present_real);

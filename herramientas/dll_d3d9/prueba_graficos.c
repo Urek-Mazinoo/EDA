@@ -211,6 +211,21 @@ static void r_armar(void)
     r_rt[0] = &r_bb; r_bb.puesto = 1;
 }
 
+/* ★ (24-nov) Reset de mentira para probar el Plan B (sin AA, último tamaño bueno, DEVICELOST, falla total) */
+static int pb_calls, pb_fail_aa;
+static DWORD pb_max_w, pb_max_h;
+static long pb_force_hr;
+static long WINAPI pb_reset_falso(void *d, void *pp)
+{
+    (void)d;
+    pb_calls++;
+    if (pb_force_hr) return pb_force_hr;
+    DWORD *p = (DWORD *)pp;
+    if (pb_fail_aa && p[4] > 0) return (long)0x8876086CL;
+    if (pb_max_w && (p[0] > pb_max_w || p[1] > pb_max_h)) return (long)0x8007000EL;
+    return 0;
+}
+
 int main(void)
 {
     printf("== el brillo: la mezcla ==\n");
@@ -531,6 +546,108 @@ int main(void)
         chequear("un destino que el juego todavía tiene: se saca pero NO se suelta (ref 1) → el Reset falla y se ve", rt_suyo->ref == 1 && r_reset(dev, NULL) == (long)0x8876086C);
         chequear("[graficos] reset_desligar viene en 1 (0 = como antes)", g_gr_desligar == 1);
         g_gr_settex_real = settex_antes;
+    }
+    printf("== (24-nov) pantalla segura: Plan B en Reset, tope 1920×1080, AA > 1920 y mouse ==\n");
+    {
+        char pb[32], iv[32];
+        g_d3d_vt[11] = (void *)cms_falso;
+        g_gr_d3d = &g_d3d_obj;
+        g_aa_hw = 8;
+
+        /* 1. Antialias no se pide por encima de 1920×1080 */
+        DWORD pp_hi[14] = {2560, 1440, 22, 1, 0, 0, 3, 0, 1, 1, 75, 1, 0, 0};
+        g_gr_aa_max = 8; g_gr_aa = 4; g_gr_aa_puesto = -1;
+        gr_ajustar_pp(pp_hi);
+        chequear("AA pedido a 2560×1440 → 0 (no se pide por encima de 1920×1080)", pp_hi[4] == 0 && g_gr_aa_puesto == 0);
+        pp_hi[0] = 3840; pp_hi[1] = 2160;
+        gr_ajustar_pp(pp_hi);
+        chequear("AA pedido a 3840×2160 → 0", pp_hi[4] == 0 && g_gr_aa_puesto == 0);
+
+        /* 2. Reset falla con antialias → reintenta sin antialias → OK */
+        g_ini_n = 0;
+        DWORD pp_ok[14] = {1280, 720, 22, 1, 0, 0, 3, 0, 1, 1, 75, 1, 0, 0};
+        g_gr_bueno_w = 800; g_gr_bueno_h = 600;
+        g_gr_aa_max = 4; g_gr_aa = 2; g_gr_aa_puesto = -1;
+        gr_ajustar_pp(pp_ok);
+        pb_calls = 0; pb_fail_aa = 1; pb_max_w = 0; pb_max_h = 0; pb_force_hr = 0;
+        long hr = gr_reset_plan_b(NULL, pp_ok, pb_reset_falso, "x", pb, (int)sizeof(pb));
+        chequear("Reset falla con AA → reintenta sin AA → OK (plan_b=sin_aa, AA apagado y guardado en .ini)",
+                 hr == 0 && pb_calls == 2 && pp_ok[4] == 0 && g_gr_aa == 0 && g_gr_aa_max == 0
+                 && !strcmp(pb, "sin_aa") && GetPrivateProfileIntA("graficos", "antialias", 9, "x") == 0
+                 && g_gr_bueno_w == 1280 && g_gr_bueno_h == 720);
+
+        /* 3. Reset falla por el tamaño → vuelve al último tamaño bueno → OK */
+        g_ini_n = 0;
+        DWORD pp_sz[14] = {1920, 1080, 22, 1, 0, 0, 3, 0, 1, 1, 75, 1, 0, 0};
+        g_gr_bueno_w = 1280; g_gr_bueno_h = 720;
+        g_gr_aa_max = 0; g_gr_aa = 0; g_gr_aa_puesto = 0;
+        pb_calls = 0; pb_fail_aa = 0; pb_max_w = 1280; pb_max_h = 720; pb_force_hr = 0;
+        hr = gr_reset_plan_b(NULL, pp_sz, pb_reset_falso, "x", pb, (int)sizeof(pb));
+        GetPrivateProfileStringA("pantalla", "resolucion", "", iv, (int)sizeof(iv), "x");
+        chequear("Reset falla por tamaño 1920×1080 → vuelve al último bueno 1280×720 → OK y guarda en .ini",
+                 hr == 0 && pb_calls == 2 && pp_sz[0] == 1280 && pp_sz[1] == 720
+                 && !strcmp(pb, "tamano_bueno") && !strcmp(iv, "1280x720"));
+
+        /* 4. Reset falla con AA y tamaño → sin AA falla → último tamaño bueno sin AA → OK */
+        g_ini_n = 0;
+        DWORD pp_ambos[14] = {1920, 1080, 22, 1, 0, 0, 3, 0, 1, 1, 75, 1, 0, 0};
+        g_gr_bueno_w = 800; g_gr_bueno_h = 600;
+        g_gr_aa_max = 4; g_gr_aa = 2; g_gr_aa_puesto = -1;
+        gr_ajustar_pp(pp_ambos);
+        pb_calls = 0; pb_fail_aa = 1; pb_max_w = 800; pb_max_h = 600; pb_force_hr = 0;
+        hr = gr_reset_plan_b(NULL, pp_ambos, pb_reset_falso, "x", pb, (int)sizeof(pb));
+        GetPrivateProfileStringA("pantalla", "resolucion", "", iv, (int)sizeof(iv), "x");
+        chequear("Reset falla con AA y tamaño → sin AA + último tamaño bueno 800×600 → OK",
+                 hr == 0 && pb_calls == 3 && pp_ambos[0] == 800 && pp_ambos[1] == 600 && pp_ambos[4] == 0
+                 && !strcmp(pb, "sin_aa+tamano_bueno") && !strcmp(iv, "800x600")
+                 && GetPrivateProfileIntA("graficos", "antialias", 9, "x") == 0);
+
+        /* 5. DEVICELOST → NO reintenta */
+        DWORD pp_lost[14] = {1920, 1080, 22, 1, 0, 0, 3, 0, 1, 1, 75, 1, 0, 0};
+        g_gr_bueno_w = 800; g_gr_bueno_h = 600;
+        g_gr_aa_max = 4; g_gr_aa = 2; g_gr_aa_puesto = -1;
+        gr_ajustar_pp(pp_lost);
+        pb_calls = 0; pb_force_hr = GR_D3DERR_DEVICELOST;
+        hr = gr_reset_plan_b(NULL, pp_lost, pb_reset_falso, "x", pb, (int)sizeof(pb));
+        chequear("D3DERR_DEVICELOST (0x88760868) → NO reintenta (1 llamada, AA y tamaño intactos)",
+                 hr == GR_D3DERR_DEVICELOST && pb_calls == 1 && pp_lost[0] == 1920 && pp_lost[4] == 2
+                 && g_gr_aa == 2 && !strcmp(pb, "devicelost"));
+
+        /* 6. Todo falla → devuelve el error */
+        DWORD pp_mal[14] = {1920, 1080, 22, 1, 0, 0, 3, 0, 1, 1, 75, 1, 0, 0};
+        pb_calls = 0; pb_force_hr = (long)0x8876086CL;
+        hr = gr_reset_plan_b(NULL, pp_mal, pb_reset_falso, "x", pb, (int)sizeof(pb));
+        chequear("si todo falla devuelve el error original (plan_b=fallo)",
+                 hr == (long)0x8876086CL && pb_calls == 3 && !strcmp(pb, "fallo"));
+        pb_force_hr = 0;
+
+        /* 7. Tope 1920×1080 para 1440p, 4K, ultrawide, 16:10 y sin tope */
+        int tw, th, ow, oh;
+        pan_parsear_tope("", &tw, &th);
+        chequear("tope por defecto = 1920×1080", tw == 1920 && th == 1080);
+        chequear("1440p (2560×1440) → 1920×1080", pan_limitar_res(2560, 1440, tw, th, &ow, &oh) == 1 && ow == 1920 && oh == 1080);
+        chequear("4K (3840×2160) → 1920×1080", pan_limitar_res(3840, 2160, tw, th, &ow, &oh) == 1 && ow == 1920 && oh == 1080);
+        chequear("ultrawide (3440×1440) → 1920×804", pan_limitar_res(3440, 1440, tw, th, &ow, &oh) == 1 && ow == 1920 && oh == 804);
+        chequear("16:10 (2560×1600) → 1728×1080", pan_limitar_res(2560, 1600, tw, th, &ow, &oh) == 1 && ow == 1728 && oh == 1080);
+        chequear("1920×1080 queda igual (sin recorte)", pan_limitar_res(1920, 1080, tw, th, &ow, &oh) == 0 && ow == 1920 && oh == 1080);
+        pan_parsear_tope("0", &tw, &th);
+        chequear("tope=0 → sin tope (3840×2160 pasa igual)", tw == 0 && th == 0 && pan_limitar_res(3840, 2160, tw, th, &ow, &oh) == 0 && ow == 3840 && oh == 2160);
+
+        /* 8. Conversión del mouse cliente ↔ backbuffer, ida y vuelta */
+        static const int MODOS_M[3][4] = {{2560, 1440, 1920, 1080}, {3840, 2160, 1920, 1080}, {3440, 1440, 1920, 804}};
+        int m_tot = 0, m_ok = 0;
+        for (int k = 0; k < 3; k++) {
+            int cw = MODOS_M[k][0], ch = MODOS_M[k][1], bw = MODOS_M[k][2], bh = MODOS_M[k][3];
+            for (int px = 0; px < cw; px += 97)
+                for (int py = 0; py < ch; py += 79) {
+                    float bx, by; int rx, ry;
+                    pan_cli_a_bb(px, py, cw, ch, bw, bh, &bx, &by);
+                    pan_bb_a_cli(bx, by, bw, bh, cw, ch, &rx, &ry);
+                    m_tot++;
+                    if (abs(rx - px) <= 1 && abs(ry - py) <= 1) m_ok++;
+                }
+        }
+        chequear("mouse cliente ↔ backbuffer ida y vuelta (±1 px) en 1440p, 4K y ultrawide", m_tot > 0 && m_tot == m_ok);
     }
     printf("prueba_graficos: %d bien · %d mal\n", ok, mal);
     return mal != 0;

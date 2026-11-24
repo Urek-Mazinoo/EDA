@@ -59,7 +59,7 @@ static void apuntar(const char *fmt, ...) { (void)fmt; g_apuntes++; }
 static BYTE *g_escena_vt;                                  /* la escena «actual» de mentira */
 static int g_mira_juego, g_inactiva;
 static POINT g_cur_fisico;
-static BOOL __attribute__((stdcall)) cursor_falso(POINT *p) { *p = g_cur_fisico; return 1; }                        /* [0x917884] y [0x90DE80] de mentira */
+static BOOL WINAPI cursor_falso(POINT *p) { *p = g_cur_fisico; return 1; }                        /* [0x917884] y [0x90DE80] de mentira */
 static BYTE *leer_ptr(const void *p)
 {
     if ((ULONG_PTR)p == 0x917884) return (BYTE *)(ULONG_PTR)g_mira_juego;
@@ -498,6 +498,43 @@ int main(void)
         chequear("(2) si la sesión anterior se cerró en el intento → protección (0)", e2d_tras_stage_al_arrancar(1, 1) == 0);
         chequear("(2) con la protección elegida a mano sigue la protección", e2d_tras_stage_al_arrancar(0, 0) == 0);
         g_e2d_fase_v = fv; g_e2d_stages = st;
+    }
+    printf("== (24-nov) pantalla segura: tope en .ini y mouse cliente ↔ backbuffer ↔ interfaz ==\n");
+    {
+        g_ini_n = 0;
+        WritePrivateProfileStringA("pantalla", "resolucion", "2560x1440", "x");
+        g_res_w = 800; g_res_h = 600; g_medir5 = 0;
+        e2d_leer_ini("x");
+        chequear("resolucion=2560x1440 guardada en .ini → limitada a 1920×1080", g_res_w == 1920 && g_res_h == 1080 && g_e2d_ini_w == 1920 && g_e2d_ini_h == 1080);
+        WritePrivateProfileStringA("pantalla", "resolucion", "3840x2160", "x");
+        g_res_w = 800; g_res_h = 600;
+        e2d_leer_ini("x");
+        chequear("resolucion=3840x2160 guardada en .ini → limitada a 1920×1080", g_res_w == 1920 && g_res_h == 1080);
+        WritePrivateProfileStringA("pantalla", "tope", "0", "x");
+        g_res_w = 800; g_res_h = 600;
+        e2d_leer_ini("x");
+        chequear("tope=0 en .ini → 3840×2160 permitida", g_res_w == 3840 && g_res_h == 2160);
+        WritePrivateProfileStringA("pantalla", "tope", "1920x1080", "x");
+
+        /* Mouse ida y vuelta con ventana sin bordes > backbuffer (1440p, 4K, ultrawide 3440×1440 → 1920×804) */
+        static const int CASOS[3][4] = {{2560, 1440, 1920, 1080}, {3840, 2160, 1920, 1080}, {3440, 1440, 1920, 804}};
+        for (int k = 0; k < 3; k++) {
+            g_cli_w = CASOS[k][0]; g_cli_h = CASOS[k][1];
+            e2d_tamano(CASOS[k][2], CASOS[k][3], "prueba_tope");
+            int bien = 1, bordes[5][2] = {{0, 0}, {799, 0}, {0, 599}, {799, 599}, {400, 300}};
+            for (int b = 0; b < 5; b++) {
+                int ux = bordes[b][0], uy = bordes[b][1];
+                int cx = ux, cy = uy;
+                e2d_ui_a_ventana((HWND)1, &cx, &cy);
+                MSG mv = {(HWND)1, WM_MOUSEMOVE, 0, MAKELPARAM(cx, cy)};
+                e2d_mouse(&mv);
+                if (abs((short)LOWORD(mv.lParam) - ux) > 1 || abs((short)HIWORD(mv.lParam) - uy) > 1) bien = 0;
+            }
+            chequear(k == 0 ? "mouse 1440p (backbuffer 1920×1080) bordes y centro ida/vuelta"
+                     : k == 1 ? "mouse 4K (backbuffer 1920×1080) bordes y centro ida/vuelta"
+                              : "mouse ultrawide 3440×1440 (backbuffer 1920×804) bordes y centro ida/vuelta", bien);
+        }
+        g_cli_w = 1920; g_cli_h = 1080;
     }
     printf("prueba_escala2d: %d bien · %d mal\n", ok, mal);
     return mal ? 1 : 0;

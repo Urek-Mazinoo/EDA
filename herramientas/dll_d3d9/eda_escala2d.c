@@ -25,8 +25,11 @@
  *   Ganchos nuevos en la tabla del dispositivo (los únicos): SetTransform, GetTransform, SetViewport, GetViewport,
  *   SetScissorRect, GetScissorRect, DrawPrimitiveUP, DrawIndexedPrimitiveUP y SetFVF. Sin hilos ni temporizadores. */
 
+#include "eda_pantalla.h"
+
 static int g_e2d;                        /* [pantalla] escala2d (0 = nada de esto) */
 static int g_e2d_stage = 1;              /* [pantalla] escala2d_stage: el HUD del Stage también (1) o como hoy (0) */
+static int g_pan_tope_w = PAN_TOPE_DEF_W, g_pan_tope_h = PAN_TOPE_DEF_H;   /* [pantalla] tope=1920x1080 (0 = sin tope) */
 static int g_e2d_activa;                 /* escala2d y un backbuffer distinto de 800×600 */
 static int g_e2d_w = 800, g_e2d_h = 600; /* el backbuffer */
 static float g_e2d_s = 1, g_e2d_rx, g_e2d_ry;
@@ -491,7 +494,8 @@ static void e2d_ventana_a_ui(HWND h, int *x, int *y)
 {
     int cw, ch;
     e2d_cliente(h, &cw, &ch);
-    float bx = (float)*x * g_e2d_w / cw, by = (float)*y * g_e2d_h / ch;     /* (Windows puede estirar un poco) */
+    float bx, by;
+    pan_cli_a_bb(*x, *y, cw, ch, g_e2d_w, g_e2d_h, &bx, &by);     /* cliente → backbuffer (Windows estira / tope 1920) */
     *x = (int)floorf((bx - g_e2d_rx) / g_e2d_s + 0.5f);
     *y = (int)floorf((by - g_e2d_ry) / g_e2d_s + 0.5f);
 }
@@ -499,8 +503,8 @@ static void e2d_ui_a_ventana(HWND h, int *x, int *y)
 {
     int cw, ch;
     e2d_cliente(h, &cw, &ch);
-    *x = (int)((g_e2d_rx + *x * g_e2d_s) * cw / g_e2d_w + 0.5f);
-    *y = (int)((g_e2d_ry + *y * g_e2d_s) * ch / g_e2d_h + 0.5f);
+    float bx = g_e2d_rx + *x * g_e2d_s, by = g_e2d_ry + *y * g_e2d_s;
+    pan_bb_a_cli(bx, by, g_e2d_w, g_e2d_h, cw, ch, x, y);          /* backbuffer → cliente */
 }
 /* ★★ (19-nov) APUNTANDO = LO QUE DICE EL JUEGO, NO UNA ADIVINANZA. Medido en el exe: el bucle principal centra el
  *   cursor físico (0x40B10B: SetPhysicalCursorPos(GetWindowRect.left + W/2, .top + H/2), vuelve a 0x40B13B) SÓLO si
@@ -952,12 +956,25 @@ static void e2d_leer_ini(const char *ini)
     g_e2d_stage = GetPrivateProfileIntA("pantalla", "escala2d_stage", 1, ini);
     g_e2d_ini_e2d = g_e2d;
     if (GetEnvironmentVariableA("EDA_ESCALA2D", v, sizeof(v))) g_e2d = atoi(v);
+    GetPrivateProfileStringA("pantalla", "tope", "1920x1080", v, sizeof(v), ini);
+    if (GetEnvironmentVariableA("EDA_PANTALLA_TOPE", a, sizeof(a))) lstrcpynA(v, a, sizeof(v));
+    pan_parsear_tope(v, &g_pan_tope_w, &g_pan_tope_h);
     int w = 0, h = 0;
     GetPrivateProfileStringA("pantalla", "resolucion", "", v, sizeof(v), ini);
-    if (e2d_res_valida(v, &w, &h)) { g_e2d_ini_w = w; g_e2d_ini_h = h; }
-    if (!g_medir5 && e2d_res_valida(v, &w, &h)) {
-        g_res_w = w;                     /* (lo que va al autoexec.cfg: screenwidth / screenheight; también sin escala) */
-        g_res_h = h;
+    if (e2d_res_valida(v, &w, &h)) {
+        int lw = w, lh = h;
+        if (pan_limitar_res(w, h, g_pan_tope_w, g_pan_tope_h, &lw, &lh)) {
+            apuntar("  (escala2d) ⚠ resolución guardada %d×%d pasa del tope (%d×%d): se usa %d×%d",
+                    w, h, g_pan_tope_w, g_pan_tope_h, lw, lh);
+            w = lw;
+            h = lh;
+        }
+        g_e2d_ini_w = w;
+        g_e2d_ini_h = h;
+        if (!g_medir5) {
+            g_res_w = w;                     /* (lo que va al autoexec.cfg: screenwidth / screenheight; también sin escala) */
+            g_res_h = h;
+        }
     }
     if (!g_e2d) {
         if (g_res_w != 800 || g_res_h != 600)
@@ -977,6 +994,7 @@ static void e2d_leer_ini(const char *ini)
         }
     }
     if (GetEnvironmentVariableA("EDA_CAPTURAS", v, sizeof(v)) && v[0] == '1') g_medir5 = 1;   /* (capturas: sólo la prueba) */
-    apuntar("  (escala2d) Adaptación 2D interna (siempre): resolución %d×%d · HUD del Stage %s%s", g_res_w, g_res_h,
+    apuntar("  (escala2d) Adaptación 2D interna (siempre): resolución %d×%d · tope %s (%d×%d) · HUD del Stage %s%s",
+            g_res_w, g_res_h, g_pan_tope_w > 0 ? "activo" : "sin tope", g_pan_tope_w, g_pan_tope_h,
             g_e2d_stage ? "escalado" : "como hoy", g_medir5 ? " · capturas del backbuffer" : "");
 }

@@ -25,6 +25,8 @@
  *     Las sombras de los personajes: ModelShadow_Proj_TextureRes 128 / 256 / 512 (el motor rehace sus texturas
  *     cuando cambia: 0x6D6532; tope 512 en 0x6D655B). */
 
+#include "eda_pantalla.h"
+
 static int g_gr_aniso = 1;            /* 1 = apagado; 2..16 */
 static int g_gr_tri = 0;
 static int g_gr_nitidez = 0;          /* 1 = MIPMAPLODBIAS −0,5 */
@@ -269,13 +271,32 @@ static void gr_placa(void *d3d, UINT ad)
     /* el máximo de MSAA con el formato del escritorio (X8R8G8B8) y profundidad D24S8 */
     g_gr_aa_max = gr_aa_soportado(d3d, ad, 22 /* X8R8G8B8 */, 75 /* D24S8 */, 1, 8);
 }
-/* los parámetros de presentación (D3DPRESENT_PARAMETERS: [4] MultiSampleType [5] Quality [6] SwapEffect [8] Windowed
- *   [9] EnableAutoDepthStencil [10] AutoDepthStencilFormat [11] Flags) */
+/* los parámetros de presentación (D3DPRESENT_PARAMETERS: [0] BackBufferWidth [1] BackBufferHeight [2] Format
+ *   [4] MultiSampleType [5] Quality [6] SwapEffect [8] Windowed [9] EnableAutoDepthStencil [10] AutoDepthStencilFormat
+ *   [11] Flags) */
+static int g_gr_bueno_w, g_gr_bueno_h;        /* ★ (24-nov) último backbuffer que dio D3D_OK (CreateDevice / Reset) */
+#define GR_D3DERR_DEVICELOST ((long)0x88760868L)
+
+static void gr_anotar_bueno(const void *pp)
+{
+    if (!pp) return;
+    const DWORD *p = (const DWORD *)pp;
+    if (p[0] >= 320 && p[1] >= 200 && p[0] <= 7680 && p[1] <= 4320) {
+        g_gr_bueno_w = (int)p[0];
+        g_gr_bueno_h = (int)p[1];
+    }
+}
+
 static void gr_ajustar_pp(void *pp)
 {
     if (!pp) return;
     DWORD *p = (DWORD *)pp;
     int aa = gr_limitar_aa(g_gr_aa);
+    if (aa && (p[0] > 1920 || p[1] > 1080)) {
+        apuntar("  (gráficos) antialias %d× desactivado por encima de 1920×1080 (%lu×%lu)", aa,
+                (unsigned long)p[0], (unsigned long)p[1]);
+        aa = 0;
+    }
     if (aa) {
         DWORD fmt = p[2] ? p[2] : 22;
         aa = gr_aa_soportado(g_gr_d3d, g_gr_adaptador, fmt, p[9] ? p[10] : 0, (int)p[8], aa);
@@ -288,6 +309,76 @@ static void gr_ajustar_pp(void *pp)
     }
     if (aa != g_gr_aa_puesto) apuntar("  (gráficos) antialias del dispositivo: %s", aa ? (aa == 2 ? "2×" : aa == 4 ? "4×" : "8×") : "no");
     g_gr_aa_puesto = aa;
+}
+
+/* ★ (24-nov) PLAN B EN RESET: si Reset falla con algo distinto de D3DERR_DEVICELOST:
+ *   1) si había antialias → reintenta sin antialias (y lo apaga para el resto de la sesión);
+ *   2) si sigue fallando y el tamaño es distinto del último que anduvo → reintenta con el último tamaño bueno;
+ *   3) si todo falla → devuelve el error como hoy.
+ *   Anota cada intento y escribe en el .ini lo que quedó andando para que el próximo arranque no repita lo que falló. */
+static long gr_reset_plan_b(void *dev, void *pp, long (WINAPI *reset_fn)(void *, void *), const char *ini,
+                            char *plan_b, int cap_pb)
+{
+    if (plan_b && cap_pb > 0) lstrcpynA(plan_b, "ninguno", cap_pb);
+    if (!reset_fn) return -1;
+    DWORD *p = (DWORD *)pp;
+    long hr = reset_fn(dev, pp);
+    apuntar("Reset(%lu×%lu, aa %d×) -> 0x%08lx", p ? (unsigned long)p[0] : 0ul, p ? (unsigned long)p[1] : 0ul,
+            g_gr_aa_puesto > 0 ? g_gr_aa_puesto : 0, (unsigned long)hr);
+    if (hr == 0) {
+        gr_anotar_bueno(pp);
+        return 0;
+    }
+    if (hr == GR_D3DERR_DEVICELOST || !p) {
+        if (hr == GR_D3DERR_DEVICELOST && plan_b && cap_pb > 0) lstrcpynA(plan_b, "devicelost", cap_pb);
+        return hr;
+    }
+    int sin_aa = 0;
+    if (g_gr_aa_puesto > 0 || p[4] > 0) {
+        int aa_antes = g_gr_aa_puesto > 0 ? g_gr_aa_puesto : (int)p[4];
+        apuntar("  (pantalla) ⚠ Reset %lu×%lu con antialias %d× falló (0x%08lx): plan B 1 → reintento SIN antialias",
+                (unsigned long)p[0], (unsigned long)p[1], aa_antes, (unsigned long)hr);
+        g_gr_aa = 0;
+        g_gr_aa_max = 0;
+        gr_ajustar_pp(pp);
+        sin_aa = 1;
+        hr = reset_fn(dev, pp);
+        apuntar("  (pantalla) plan B 1 (sin antialias, %lu×%lu) -> 0x%08lx",
+                (unsigned long)p[0], (unsigned long)p[1], (unsigned long)hr);
+        if (hr == 0) {
+            gr_anotar_bueno(pp);
+            if (ini && ini[0]) WritePrivateProfileStringA("graficos", "antialias", "0", ini);
+            if (plan_b && cap_pb > 0) lstrcpynA(plan_b, "sin_aa", cap_pb);
+            return 0;
+        }
+        if (hr == GR_D3DERR_DEVICELOST) {
+            if (plan_b && cap_pb > 0) lstrcpynA(plan_b, "devicelost", cap_pb);
+            return hr;
+        }
+    }
+    if (g_gr_bueno_w >= 320 && g_gr_bueno_h >= 200
+        && ((int)p[0] != g_gr_bueno_w || (int)p[1] != g_gr_bueno_h)) {
+        apuntar("  (pantalla) ⚠ Reset %lu×%lu falló (0x%08lx): plan B 2 → reintento con último tamaño bueno %d×%d",
+                (unsigned long)p[0], (unsigned long)p[1], (unsigned long)hr, g_gr_bueno_w, g_gr_bueno_h);
+        p[0] = (DWORD)g_gr_bueno_w;
+        p[1] = (DWORD)g_gr_bueno_h;
+        hr = reset_fn(dev, pp);
+        apuntar("  (pantalla) plan B 2 (último tamaño bueno %d×%d) -> 0x%08lx", g_gr_bueno_w, g_gr_bueno_h, (unsigned long)hr);
+        if (hr == 0) {
+            if (ini && ini[0]) {
+                char res_v[32];
+                wsprintfA(res_v, "%dx%d", g_gr_bueno_w, g_gr_bueno_h);
+                if (sin_aa) WritePrivateProfileStringA("graficos", "antialias", "0", ini);
+                WritePrivateProfileStringA("pantalla", "resolucion", res_v, ini);
+                WritePrivateProfileStringA("pantalla", "confirmar", "0", ini);
+                WritePrivateProfileStringA("pantalla", "intentos", "0", ini);
+            }
+            if (plan_b && cap_pb > 0) lstrcpynA(plan_b, sin_aa ? "sin_aa+tamano_bueno" : "tamano_bueno", cap_pb);
+            return 0;
+        }
+    }
+    if (plan_b && cap_pb > 0) lstrcpynA(plan_b, "fallo", cap_pb);
+    return hr;
 }
 
 /* ── 2. el brillo, en el Present ── */

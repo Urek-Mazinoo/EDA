@@ -2,6 +2,19 @@
  "_leeme": "Las novedades de cada RELEASE del cliente que reparte el launcher (una entrada por versión, la más nueva primero). Texto para el JUGADOR: corto, sin HTML, sin direcciones de memoria. Regla y flujo: documentacion/VERSIONES.md. Se revisa con: py herramientas\\version_cliente.py revisar.",
  "versiones": [
   {
+   "version": "2026.11.24",
+   "borrador": true,
+   "fecha": "2026-11-24",
+   "dll": "0.5.5",
+   "resumen": "Pantalla más segura: el juego ya no se cierra al cambiar la resolución o la pantalla completa.",
+   "corregidos": [
+    "Pantalla: el juego ya no se cierra al cambiar la resolución o la pantalla completa."
+   ],
+   "mejoras": [
+    "Pantalla completa en monitores grandes: imagen a 1920×1080, más fluida."
+   ]
+  },
+  {
    "version": "2026.11.23",
    "fecha": "2026-11-23",
    "dll": "0.5.4",
