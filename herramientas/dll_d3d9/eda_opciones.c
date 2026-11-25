@@ -467,8 +467,14 @@ static void opc_poner_sin_bordes(int si)
                          g_rect_viejo.bottom - g_rect_viejo.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
         else
             SetWindowPos(v, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW);
-        if (g_res_w >= 320 && g_res_h >= 200) pan_vivo_ventana(g_res_w, g_res_h);
-        apuntar("  [mazino] opciones: de vuelta a modo ventana (monitor %d)", g_pantalla_monitor);
+        /* ★ (24-nov, 21:53 medido) la ventana va al tamaño del BACKBUFFER de ahora (g_e2d_w×g_e2d_h, ya con el Reset
+         *   a la resolución de ventana hecho), no a g_res_w×g_res_h: ése se confirma ~1 s después del cambio en vivo y
+         *   todavía era el de la pantalla completa (1920×1080) → la ventana quedaba del tamaño del monitor (1920×1071) con
+         *   la imagen chica estirada, hasta el próximo cambio de resolución. */
+        int vw = g_e2d_w >= 320 && g_e2d_h >= 200 ? g_e2d_w : g_res_w;
+        int vh = g_e2d_w >= 320 && g_e2d_h >= 200 ? g_e2d_h : g_res_h;
+        if (vw >= 320 && vh >= 200) pan_vivo_ventana(vw, vh);
+        apuntar("  [mazino] opciones: de vuelta a modo ventana (monitor %d, ventana %d×%d)", g_pantalla_monitor, vw, vh);
     }
 }
 /* (en el hilo del juego) lo pedido; y si el juego le devolvió los bordes a su ventana, se los saca otra vez */
@@ -1105,6 +1111,9 @@ static void pan_motor_tamano(BYTE *o, int w, int h)
     *(int *)(o + 0x46C) = aw;
     *(int *)(o + 0x330) = aw;
     ((R_ORTO)0x0077B4F0)(o, aw, ah);                     /* (la ortográfica de la interfaz, con el tamaño real) */
+    /* ★ (24-nov) si lo pedido es VENTANA y ya no está sin bordes, la ventana al tamaño real (por si el paso de pantalla
+     *   completa a ventana corrió antes que este Reset y la dejó con el tamaño de la pantalla completa) */
+    if (!g_op.completa && !g_sin_bordes) pan_vivo_ventana(aw, ah);
 }
 static void pan_motor_anotar(const char *cuando, BYTE *o)
 {
