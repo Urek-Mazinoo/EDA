@@ -202,20 +202,37 @@ static void e2d_mapear(long *x, long *y, long *w, long *h)
  *   Un viewport (0,0)-(ancho, alto) con un tamaño que FUE el backbuffer en esta sesión (y ya no lo es) es «la pantalla
  *   entera» de antes: se pone la de ahora. Lo mismo para los dibujos XYZRHW de pantalla entera (el «light add»). Sólo
  *   con tamaños que dejaron de ser el backbuffer por un cambio en vivo (pan_vivo); sin cambios en vivo, nada. */
-static int g_e2d_viejos[6][2], g_e2d_viejos_n;
+#define E2D_VIEJOS_MAX 32
+static int g_e2d_viejos[E2D_VIEJOS_MAX][2], g_e2d_viejos_n;
 static long c_e2d_vp_viejo, c_e2d_rhw_viejo;
 static void e2d_viejo_agregar(int w, int h)
 {
     if (w < 320 || h < 200) return;
     for (int i = 0; i < g_e2d_viejos_n; i++)
         if (g_e2d_viejos[i][0] == w && g_e2d_viejos[i][1] == h) return;
-    if (g_e2d_viejos_n < 6) { g_e2d_viejos[g_e2d_viejos_n][0] = w; g_e2d_viejos[g_e2d_viejos_n][1] = h; g_e2d_viejos_n++; }
+    if (g_e2d_viejos_n < E2D_VIEJOS_MAX) {
+        g_e2d_viejos[g_e2d_viejos_n][0] = w;
+        g_e2d_viejos[g_e2d_viejos_n][1] = h;
+        g_e2d_viejos_n++;
+    }
 }
 static int e2d_es_viejo(long w, long h)
 {
     if (w == g_e2d_w && h == g_e2d_h) return 0;
     for (int i = 0; i < g_e2d_viejos_n; i++)
         if (g_e2d_viejos[i][0] == w && g_e2d_viejos[i][1] == h) return 1;
+    return 0;
+}
+static int e2d_aspecto_viejo(float fx, float fy)
+{
+    if (fx <= 0.0f || fy <= 0.0f || g_e2d_w <= 0 || g_e2d_h <= 0) return 0;
+    float r = fy / fx;
+    float cur = (float)g_e2d_h / (float)g_e2d_w;
+    if (fabsf(r - cur) < 0.015f) return 0;
+    for (int i = 0; i < g_e2d_viejos_n; i++) {
+        float rv = (float)g_e2d_viejos[i][1] / (float)g_e2d_viejos[i][0];
+        if (fabsf(r - rv) < 0.02f) return 1;
+    }
     return 0;
 }
 static int e2d_vp_entero(const DWORD *v) { return v[0] == 0 && v[1] == 0 && (int)v[2] == g_e2d_w && (int)v[3] == g_e2d_h; }
@@ -270,7 +287,7 @@ static long WINAPI e2d_settransform(void *dev, DWORD tipo, const float *m)
     }
     if (tipo == 3 && m && !g_e2d_propio)                     /* ★ (Punto 6) ¿interfaz (ortográfica)? también a 800×600 */
         g_e2d_es_orto = fabsf(m[11]) < 1e-5f && fabsf(m[15] - 1) < 1e-4f;
-    if (!g_e2d_activa || tipo != 3 /* D3DTS_PROJECTION */ || !m || E2D_PASA) {
+    if (tipo != 3 /* D3DTS_PROJECTION */ || !m || E2D_PASA || (!g_e2d_activa && g_e2d_viejos_n <= 0)) {
         long hr = g_e2d_st_real(dev, tipo, m);
         EDA_G_SALIR(EDA_G_SETTRANSFORM);
         return hr;
@@ -281,6 +298,31 @@ static long WINAPI e2d_settransform(void *dev, DWORD tipo, const float *m)
     memcpy(p, m, sizeof(p));
     int orto = fabsf(m[11]) < 1e-5f && fabsf(m[15] - 1) < 1e-4f;
     int persp = fabsf(m[11] - 1) < 1e-3f && fabsf(m[15]) < 1e-4f && m[0] > 0 && m[5] > 0;
+    if (!g_e2d_activa) {
+        if (persp) {
+            g_e2d_tipo = 3;
+            if (!g_e2d_stage_ahora) {
+                if (!g_e2d_rt_fuera) {
+                    /* ★ (24-nov) Tras volver en vivo a 800×600 desde 16:9, la cámara del lobby/Inventory/Select
+                     *   Character (0x5BB9D0) conserva FovY de 16:9; aquí la pantalla vuelve a ser 4:3 exacto. */
+                    float fx = 2.0f * atanf(1.0f / m[0]);
+                    g_e2d_k = 1.0f;
+                    p[5] = 1.0f / tanf(fx * 0.75f / 2.0f);
+                }
+                InterlockedIncrement(&c_e2d_persp);
+            } else {
+                if (!g_e2d_rt_fuera) {
+                    float fx = 2.0f * atanf(1.0f / m[0]), fy = 2.0f * atanf(1.0f / m[5]);
+                    if (e2d_aspecto_viejo(fx, fy))
+                        p[5] = 1.0f / tanf(fx * ((float)g_e2d_h / (float)g_e2d_w) / 2.0f);
+                }
+                InterlockedIncrement(&c_e2d_persp_stage);
+            }
+        } else g_e2d_tipo = 0;
+        long hr = g_e2d_st_real(dev, tipo, p);
+        EDA_G_SALIR(EDA_G_SETTRANSFORM);
+        return hr;
+    }
     if (orto) {
         int entera = fabsf(m[0] * g_e2d_w / 2 - 1) < 0.02f && fabsf(-m[5] * g_e2d_h / 2 - 1) < 0.02f;
         if (entera) {
@@ -302,15 +344,25 @@ static long WINAPI e2d_settransform(void *dev, DWORD tipo, const float *m)
     } else if (persp) {
         g_e2d_tipo = 3;
         if (!g_e2d_stage_ahora) {
-            /* el FOV vertical que el juego habría puesto a 800×600 (su regla: FovY = FovX · k · H/W, k medido) */
-            float fx = 2 * atanf(1 / m[0]), fy = 2 * atanf(1 / m[5]);
-            float k = fy * g_e2d_w / (fx * g_e2d_h);
-            if (k > 0.5f && k < 2.0f) {
-                g_e2d_k = k;
-                p[5] = 1 / tanf(fx * k * 0.75f / 2);
+            if (!g_e2d_rt_fuera) {
+                /* ★ (24-nov) En EDA_limpio.exe (0x5BB9D0: lobby, Inventory, Select Character) la cámara fija
+                 *   FovX = 70° y FovY = FovX × H/W UNA sola vez al crearse (k = 1,00 siempre). Tras un cambio
+                 *   en vivo su FovY queda del tamaño anterior: recomputar k con el backbuffer nuevo daba k = 1,33
+                 *   (4:3→16:9) o 0,75 (16:9→4:3) y cambiaba el tamaño del personaje. Su viewport efectivo es
+                 *   siempre R (4:3), así que FovY es siempre FovX × 0,75 (igual que al arrancar ahí). */
+                float fx = 2.0f * atanf(1.0f / m[0]);
+                g_e2d_k = 1.0f;
+                p[5] = 1.0f / tanf(fx * 0.75f / 2.0f);
             }
             InterlockedIncrement(&c_e2d_persp);
-        } else InterlockedIncrement(&c_e2d_persp_stage);
+        } else {
+            if (g_e2d_viejos_n > 0 && !g_e2d_rt_fuera) {
+                float fx = 2.0f * atanf(1.0f / m[0]), fy = 2.0f * atanf(1.0f / m[5]);
+                if (e2d_aspecto_viejo(fx, fy))
+                    p[5] = 1.0f / tanf(fx * ((float)g_e2d_h / (float)g_e2d_w) / 2.0f);
+            }
+            InterlockedIncrement(&c_e2d_persp_stage);
+        }
     } else g_e2d_tipo = 0;
     long hr = g_e2d_st_real(dev, tipo, p);
     e2d_aplicar_vp(dev);                                     /* (el viewport depende de la proyección vigente) */
@@ -320,7 +372,7 @@ static long WINAPI e2d_settransform(void *dev, DWORD tipo, const float *m)
 static long WINAPI e2d_gettransform(void *dev, DWORD tipo, float *m)
 {
     EDA_G_ENTRAR_HR(EDA_G_GETTRANSFORM, E2D_GT, dev, tipo, m);
-    if (g_e2d_activa && tipo == 3 && m && g_e2d_proj_hay) {
+    if ((g_e2d_activa || g_e2d_viejos_n > 0) && tipo == 3 && m && g_e2d_proj_hay) {
         memcpy(m, g_e2d_proj, sizeof(g_e2d_proj));
         InterlockedIncrement(&c_e2d_get);
         EDA_G_SALIR(EDA_G_GETTRANSFORM);
@@ -351,7 +403,9 @@ static long WINAPI e2d_setviewport(void *dev, const DWORD *v)
         InterlockedDecrement(&g_e2d_vp_diag);
     }
     DWORD nuevo[6];
-    if (v && !E2D_PASA && v[0] == 0 && v[1] == 0 && e2d_es_viejo((long)v[2], (long)v[3])) {
+    if (v && !E2D_PASA && v[0] == 0 && v[1] == 0
+        && (e2d_es_viejo((long)v[2], (long)v[3])
+            || (!g_e2d_rt_fuera && ((int)v[2] > g_e2d_w || (int)v[3] > g_e2d_h)))) {
         memcpy(nuevo, v, sizeof(nuevo));
         nuevo[2] = (DWORD)g_e2d_w;                       /* (la pantalla entera de antes → la de ahora) */
         nuevo[3] = (DWORD)g_e2d_h;

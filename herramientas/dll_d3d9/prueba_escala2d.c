@@ -536,6 +536,80 @@ int main(void)
         }
         g_cli_w = 1920; g_cli_h = 1080;
     }
+    printf("== (24-nov) cámara del personaje (0x5BB9D0) y viewport tras cambios EN VIVO ==\n");
+    {
+        float rad2 = 3.14159265f / 180.0f;
+        float mp[16], mg[16];
+        g_e2d = 1;
+        g_e2d_propio = 0;
+        g_e2d_rt_fuera = 0;
+        g_e2d_stage_ahora = 0;
+        g_e2d_viejos_n = 0;
+        /* Caso 1: lobby creado a 800×600 (4:3, FovY 52,5°), cambiado en vivo a 1920×1080 (16:9) */
+        e2d_tamano(800, 600, "lobby0");
+        e2d_viejo_agregar(800, 600);
+        e2d_tamano(1920, 1080, "vivo_1920");
+        DWORD vp_800[6] = {0, 0, 800, 600, 0, 0x3F800000};
+        ((E2D_VP)vt[47])(dev, vp_800);
+        perspectiva(mp, 70.0f * rad2, 70.0f * rad2 * 600.0f / 800.0f);   /* 52,5° de cuando se creó a 800×600 */
+        ((E2D_ST)vt[44])(dev, 3, mp);
+        float fy1 = 2.0f * atanf(1.0f / d_proj[5]) / rad2;
+        chequear("lobby 800×600 → 1920×1080 en vivo: FovY sigue 52,5° (no 70°), k = 1,00",
+                 cerca(fy1, 52.5f, 0.05f) && cerca(g_e2d_k, 1.0f, 0.01f) && d_proj[0] == mp[0]);
+        chequear("lobby 800×600 → 1920×1080 en vivo: viewport viejo (0,0) 800×600 → R (240,0,1440×1080)",
+                 d_vp[0] == 240 && d_vp[1] == 0 && d_vp[2] == 1440 && d_vp[3] == 1080);
+
+        /* Caso 2: lobby creado a 1920×1080 (16:9, FovY 39,375°), cambiado en vivo a 1024×768 (4:3) */
+        e2d_viejo_agregar(1920, 1080);
+        e2d_tamano(1024, 768, "vivo_1024");
+        DWORD vp_1920[6] = {0, 0, 1920, 1080, 0, 0x3F800000};
+        ((E2D_VP)vt[47])(dev, vp_1920);
+        perspectiva(mp, 70.0f * rad2, 70.0f * rad2 * 1080.0f / 1920.0f); /* 39,375° de cuando se creó a 1920×1080 */
+        ((E2D_ST)vt[44])(dev, 3, mp);
+        float fy2 = 2.0f * atanf(1.0f / d_proj[5]) / rad2;
+        chequear("lobby 1920×1080 → 1024×768 en vivo: FovY pasa a 52,5° (no 39,4°), viewport 1024×768",
+                 cerca(fy2, 52.5f, 0.05f) && d_vp[0] == 0 && d_vp[1] == 0 && d_vp[2] == 1024 && d_vp[3] == 768);
+
+        /* Caso 3: lobby creado a 1920×1080 (16:9), cambiado en vivo a 800×600 (g_e2d_activa == 0) */
+        e2d_viejo_agregar(1024, 768);
+        e2d_tamano(800, 600, "vivo_800");
+        ((E2D_ST)vt[44])(dev, 3, mp);
+        float fy3 = 2.0f * atanf(1.0f / d_proj[5]) / rad2;
+        ((E2D_GT)vt[45])(dev, 3, mg);
+        chequear("lobby 1920×1080 → 800×600 en vivo: FovY vuelve a 52,5° y GetTransform devuelve la del juego",
+                 !g_e2d_activa && cerca(fy3, 52.5f, 0.05f) && !memcmp(mg, mp, sizeof(mp)));
+
+        /* Caso 4: Stage creado a 1920×1080 (16:9), cambiado en vivo a 800×600 (4:3) */
+        g_e2d_stage_ahora = 1;
+        ((E2D_ST)vt[44])(dev, 3, mp);
+        float fy4 = 2.0f * atanf(1.0f / d_proj[5]) / rad2;
+        chequear("Stage 1920×1080 → 800×600 en vivo: aspecto 3D se corrige a 52,5° (4:3)",
+                 cerca(fy4, 52.5f, 0.05f));
+        /* Una sombra cuadrada (90°×90°) en render target fuera de pantalla no se toca */
+        g_e2d_rt_fuera = 1;
+        float msom[16];
+        perspectiva(msom, 90.0f * rad2, 90.0f * rad2);
+        ((E2D_ST)vt[44])(dev, 3, msom);
+        chequear("proyección cuadrada de sombra en render target fuera de pantalla no se toca",
+                 !memcmp(d_proj, msom, sizeof(msom)));
+        DWORD vp_cap[6] = {0, 0, 1024, 1024, 0, 0x3F800000};
+        ((E2D_VP)vt[47])(dev, vp_cap);
+        chequear("viewport 1024×1024 de Capítulos en render target no se recorta a 800×600",
+                 d_vp[2] == 1024 && d_vp[3] == 1024);
+
+        /* Caso 5: viewport sobredimensionado en pantalla (no RT) se recorta al backbuffer actual */
+        g_e2d_rt_fuera = 0;
+        g_e2d_viejos_n = 0;
+        ((E2D_VP)vt[47])(dev, vp_1920);
+        chequear("viewport (0,0) 1920×1080 en backbuffer 800×600 (sin RT) → recortado a 800×600",
+                 d_vp[2] == 800 && d_vp[3] == 600);
+
+        /* Caso 6: más de 6 resoluciones viejas registradas (hasta 32) */
+        for (int k = 0; k < 10; k++) e2d_viejo_agregar(800 + k * 64, 600 + k * 36);
+        chequear("tabla g_e2d_viejos guarda más de 6 resoluciones (10 registradas)", g_e2d_viejos_n == 10);
+        g_e2d_stage_ahora = 0;
+        g_e2d_viejos_n = 0;
+    }
     printf("prueba_escala2d: %d bien · %d mal\n", ok, mal);
     return mal ? 1 : 0;
 }

@@ -21,6 +21,17 @@ static unsigned long g_test_tid = 100ul;
 #include "eda_ganchos.h"
 #include "eda_recursos.h"
 
+/* lee n bytes del exe en la dirección virtual va (EDA_limpio.exe: sección 0 con VirtualAddress 0x1000 y
+ *   PointerToRawData 0x1000 → offset = va − 0x400000, como la prueba de la fuga de índices) */
+static int leer_pe_va(const char *ruta, unsigned long va, unsigned char *dst, size_t n)
+{
+    FILE *f = fopen(ruta, "rb");
+    if (!f) return 0;
+    int ok = va > 0x00400000ul && fseek(f, (long)(va - 0x00400000ul), SEEK_SET) == 0 && fread(dst, 1, n, f) == n;
+    fclose(f);
+    return ok;
+}
+
 static int ok, mal;
 static void chequear(const char *que, int si)
 {
@@ -520,11 +531,90 @@ static void probar_parte_c(void)
     }
 }
 
+static int rt_legible_siempre(const void *p, size_t n) { return p != NULL && n > 0; }
+
+static void probar_rt_motor(const char *exe_ruta)
+{
+    printf("== Parte D: render targets de pantalla de LithTech (0x665320 / 0x664830 / 0x665630) ==\n");
+    unsigned char s_get[sizeof(EDA_RT_MGR_GET_SIG)];
+    unsigned char s_rec[sizeof(EDA_RT_MGR_RECALL_SIG)];
+    unsigned char s_one[sizeof(EDA_RT_RECREATE_SIG)];
+    memcpy(s_get, EDA_RT_MGR_GET_SIG, sizeof(s_get));
+    memcpy(s_rec, EDA_RT_MGR_RECALL_SIG, sizeof(s_rec));
+    memcpy(s_one, EDA_RT_RECREATE_SIG, sizeof(s_one));
+    chequear("firmas CD3D_RenderTargetMgr (3 funciones) coinciden → válidas",
+             eda_rt_verificar_bytes(s_get, s_rec, s_one) == 1);
+    s_one[8] ^= 0xFF;
+    chequear("1 byte distinto en CRenderTarget::Recreate → firma rechazada",
+             eda_rt_verificar_bytes(s_get, s_rec, s_one) == 0);
+    s_one[8] ^= 0xFF;
+
+    if (exe_ruta && exe_ruta[0]) {
+        unsigned char r_get[sizeof(EDA_RT_MGR_GET_SIG)] = {0};
+        unsigned char r_rec[sizeof(EDA_RT_MGR_RECALL_SIG)] = {0};
+        unsigned char r_one[sizeof(EDA_RT_RECREATE_SIG)] = {0};
+        int ok_exe = leer_pe_va(exe_ruta, EDA_RT_MGR_GET_ADDR, r_get, sizeof(r_get))
+                  && leer_pe_va(exe_ruta, EDA_RT_MGR_RECALL_ADDR, r_rec, sizeof(r_rec))
+                  && leer_pe_va(exe_ruta, EDA_RT_RECREATE_ADDR, r_one, sizeof(r_one))
+                  && eda_rt_verificar_bytes(r_get, r_rec, r_one);
+        chequear("EDA_limpio.exe real: firmas 0x665320 / 0x664830 / 0x665630 verificadas byte a byte", ok_exe);
+    }
+
+    /* Árbol RB sintético como std::map<HRENDERTARGET, CRenderTarget*> en 0x00938954:
+     *   - rt1: pantalla actual 1920×1080 (liberado tras ReleaseAll) → debe pasar a 800×600
+     *   - rt2: pantalla anterior 1280×720 en viejos[] (liberado) → debe pasar a 800×600
+     *   - rt3: fijo cuadrado 1024×1024 (p. ej. sombra/cubo/capítulos) → NO se toca
+     *   - rt4: 1920×1080 pero todavía vivo (tex != NULL) → NO se toca por seguridad */
+    EDA_LT_RT rt1 = {1920, 1080, 1, 0, NULL, NULL};
+    EDA_LT_RT rt2 = {1280, 720,  1, 0, NULL, NULL};
+    EDA_LT_RT rt3 = {1024, 1024, 0, 0, NULL, NULL};
+    EDA_LT_RT rt4 = {1920, 1080, 1, 0, (void *)(uintptr_t)0x1234, NULL};
+
+    EDA_LT_RBNODE head, n1, n2, n3, n4;
+    memset(&head, 0, sizeof(head));
+    memset(&n1, 0, sizeof(n1));
+    memset(&n2, 0, sizeof(n2));
+    memset(&n3, 0, sizeof(n3));
+    memset(&n4, 0, sizeof(n4));
+    head.is_nil = 1;
+    head.parent = &n2; /* root */
+    head.left = &n1;   /* begin */
+    head.right = &n4;  /* last */
+
+    n1.left = &head; n1.parent = &n2; n1.right = &head; n1.key = 1; n1.val = &rt1;
+    n2.left = &n1;   n2.parent = &head; n2.right = &n3; n2.key = 2; n2.val = &rt2;
+    n3.left = &head; n3.parent = &n2; n3.right = &n4;   n3.key = 3; n3.val = &rt3;
+    n4.left = &head; n4.parent = &n3; n4.right = &head; n4.key = 4; n4.val = &rt4;
+
+    const int viejos[2][2] = {{1280, 720}, {1600, 900}};
+    int adj1 = eda_rt_ajustar_arbol(&head, 1920, 1080, 800, 600, viejos, 2, rt_legible_siempre);
+    chequear("Reset 1920×1080 → 800×600: ajusta los 2 RT de pantalla (1920×1080 y 1280×720) a 800×600",
+             adj1 == 2 && rt1.w == 800 && rt1.h == 600 && rt2.w == 800 && rt2.h == 600);
+    chequear("RT cuadrado 1024×1024 y RT con textura viva NO se tocan",
+             rt3.w == 1024 && rt3.h == 1024 && rt4.w == 1920 && rt4.h == 1080);
+
+    int adj2 = eda_rt_ajustar_arbol(&head, 800, 600, 1280, 720, viejos, 2, rt_legible_siempre);
+    chequear("2º Reset 800×600 → 1280×720: ambos RT de pantalla siguen al tamaño nuevo (1280×720)",
+             adj2 == 2 && rt1.w == 1280 && rt1.h == 720 && rt2.w == 1280 && rt2.h == 720 && rt3.w == 1024);
+
+    /* Árbol corrupto con ciclo: termina acotado sin colgarse */
+    EDA_LT_RBNODE c_head, c_a, c_b;
+    memset(&c_head, 0, sizeof(c_head));
+    memset(&c_a, 0, sizeof(c_a));
+    memset(&c_b, 0, sizeof(c_b));
+    c_head.is_nil = 1; c_head.left = &c_a;
+    c_a.right = &c_b; c_a.parent = &c_head; c_a.left = &c_head;
+    c_b.right = &c_a; c_b.parent = &c_a; c_b.left = &c_head;
+    int adj_ciclo = eda_rt_ajustar_arbol(&c_head, 1920, 1080, 800, 600, NULL, 0, rt_legible_siempre);
+    chequear("árbol RB corrupto con ciclo termina de forma segura (sin bucle infinito)", adj_ciclo == 0);
+}
+
 int main(int argc, char **argv)
 {
     probar_parte_a();
     probar_parte_b(argc > 1 ? argv[1] : NULL);
     probar_parte_c();
+    probar_rt_motor(argc > 1 ? argv[1] : NULL);
     printf("prueba_pantalla: %d bien · %d mal\n", ok, mal);
     return mal ? 1 : 0;
 }

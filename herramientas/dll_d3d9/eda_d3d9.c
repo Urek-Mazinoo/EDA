@@ -672,6 +672,20 @@ static void rec_verificar_fuga_ib(void)
             ok ? "firmas verificadas · corrección ACTIVA"
                : (g_arreglar_fuga_ib ? "⚠ firmas distintas (¿otro exe?): desactivada" : "desactivada por .ini"));
 }
+static int g_rt_fix_ok;
+static int rec_legible_cb(const void *p, size_t n) { return legible(p, (SIZE_T)n); }
+static void rec_verificar_rt_motor(void)
+{
+    g_rt_fix_ok = legible((const void *)(ULONG_PTR)EDA_RT_MGR_GET_ADDR, sizeof(EDA_RT_MGR_GET_SIG))
+        && legible((const void *)(ULONG_PTR)EDA_RT_MGR_RECALL_ADDR, sizeof(EDA_RT_MGR_RECALL_SIG))
+        && legible((const void *)(ULONG_PTR)EDA_RT_RECREATE_ADDR, sizeof(EDA_RT_RECREATE_SIG))
+        && eda_rt_verificar_bytes((const unsigned char *)(ULONG_PTR)EDA_RT_MGR_GET_ADDR,
+                                  (const unsigned char *)(ULONG_PTR)EDA_RT_MGR_RECALL_ADDR,
+                                  (const unsigned char *)(ULONG_PTR)EDA_RT_RECREATE_ADDR);
+    apuntar("  (pantalla) render targets de pantalla del motor (0x665320/0x664830/0x665630): %s",
+            g_rt_fix_ok ? "firmas verificadas · ajuste ACTIVO"
+                        : "⚠ firmas distintas (¿otro exe?): desactivado");
+}
 static int rec_tras_stage_seguro(char *motivo, int cap)
 {
     int desc = 0;
@@ -2573,8 +2587,20 @@ static void pan_monitor_actual(HWND foco, int *mw, int *mh)
     *mh = GetSystemMetrics(SM_CYSCREEN);
 }
 
+static int rec_ajustar_rt_motor(int old_w, int old_h, int new_w, int new_h)
+{
+    if (!g_rt_fix_ok || new_w < 320 || new_h < 200) return 0;
+    if (!legible((const void *)(ULONG_PTR)EDA_RT_MGR_INIT_ADDR, 1)
+        || !(*(const BYTE *)(ULONG_PTR)EDA_RT_MGR_INIT_ADDR & 1)
+        || !legible((const void *)(ULONG_PTR)EDA_RT_MGR_HEAD_ADDR, sizeof(void *)))
+        return 0;
+    void *head = *(void *const *)(ULONG_PTR)EDA_RT_MGR_HEAD_ADDR;
+    return eda_rt_ajustar_arbol(head, old_w, old_h, new_w, new_h, g_e2d_viejos, g_e2d_viejos_n, rec_legible_cb);
+}
+
 static long WINAPI mi_reset_cuerpo(void *dev, void *pp)
 {
+    int old_w = g_e2d_w, old_h = g_e2d_h;
     if (g_bloque) {
         if (g_bloque_dev == dev)
             ((M_SB)VT(g_bloque)[2])(g_bloque);                     /* Release (si no, Reset falla) */
@@ -2604,6 +2630,14 @@ static long WINAPI mi_reset_cuerpo(void *dev, void *pp)
             g_res_w = (int)((DWORD *)pp)[0];
             g_res_h = (int)((DWORD *)pp)[1];
         }
+        /* ★ (24-nov) Antes de volver a CD3D_Device::RestoreAll → CD3D_RenderTargetMgr::RecreateAll (0x664830),
+         *   actualizar m_nWidth/m_nHeight de los render targets de pantalla del motor al tamaño nuevo: si no,
+         *   0x6656BA los rehace con el tamaño viejo y en el Stage vuelve la distorsión («efecto agua»). */
+        int new_w = pp ? (int)((DWORD *)pp)[0] : g_e2d_w;
+        int new_h = pp ? (int)((DWORD *)pp)[1] : g_e2d_h;
+        int rt_adj = rec_ajustar_rt_motor(old_w, old_h, new_w, new_h);
+        if (rt_adj > 0)
+            apuntar("  ★ Reset: %d render target(s) de pantalla del motor ajustados → %d×%d", rt_adj, new_w, new_h);
         if (g_e2d_stages > 0)
             apuntar("  ★ Reset tras %d Stage(s) → OK · fugas IB corregidas: %ld (drenadas: %d) · POOL_DEFAULT restantes: %d",
                     g_e2d_stages, g_fuga_ib.arregladas, drenados, g_rec.vivos);
@@ -3034,7 +3068,10 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD razon, LPVOID reservado)
     g_crear = (CREAR9)GetProcAddress(g_real, "Direct3DCreate9");
     if (!g_crear) return FALSE;
     leer_ajustes((HMODULE)self);
-    if (g_mejoras) rec_verificar_fuga_ib();
+    if (g_mejoras) {
+        rec_verificar_fuga_ib();
+        rec_verificar_rt_motor();
+    }
     QueryPerformanceFrequency(&g_frec);
     timeBeginPeriod(1);                                          /* Sleep(1) ≈ 1 ms */
     apuntar("──────── eda_d3d9 cargada · el d3d9 real: %s · mejoras %d · tope %d · contador %d · caja negra %d"

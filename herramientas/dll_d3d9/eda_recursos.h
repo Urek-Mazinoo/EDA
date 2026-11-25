@@ -352,4 +352,118 @@ static inline int eda_rec_listar_origen(const EDA_REC_TABLA *t, int origen, char
     return n;
 }
 
+/* ── 3. Ajuste de render targets de pantalla de LithTech tras un Reset en vivo ──
+ * Evidencia verificada en EDA_limpio.exe:
+ *   - CD3D_RenderTargetMgr::GetSingleton (0x00665320): instancia global en 0x00938954 (bandera de init en 0x00938964
+ *     bit 0; puntero al nodo centinela del std::map<HRENDERTARGET, CRenderTarget*> en 0x00938958 = +4).
+ *   - CD3D_RenderTargetMgr::ReleaseAll (0x006647C0, llamada desde CD3D_Device::ReleaseAll 0x0065BB9B antes de Reset)
+ *     suelta m_pTexture (+0x10) y m_pDepthStencil (+0x14) dejándolos en NULL.
+ *   - CD3D_RenderTargetMgr::RecreateAll (0x00664830, llamada desde CD3D_Device::RestoreAll 0x0065AD20 justo al
+ *     volver de Reset == 0) recorre el árbol RB y llama a CRenderTarget::Recreate (0x00665630), que crea la textura
+ *     (0x006656B7, vuelta 0x006656BA) y su depth-stencil (0x00665724) con [esi+0] (m_nWidth) y [esi+4] (m_nHeight).
+ *   - Al cambiar de resolución en vivo dentro/tras un Stage, m_nWidth/m_nHeight conservaban el tamaño viejo
+ *     (p. ej. 1920×1080 en un backbuffer 800×600) → el efecto de distorsión al atacar copiaba/dibujaba desfasado
+ *     («efecto agua»). Actualizando m_nWidth/m_nHeight justo después de Reset == 0 (antes de RecreateAll) para los
+ *     render targets no cuadrados del tamaño de pantalla anterior, RecreateAll los crea al tamaño nuevo exacto y
+ *     CLTRenderMgr::GetRenderTargetDims (0x0045CF30) también devuelve el tamaño nuevo. Los de tamaño fijo cuadrado
+ *     (128/256/512/1024×1024) nunca se tocan. */
+#define EDA_RT_MGR_GET_ADDR     0x00665320u
+#define EDA_RT_MGR_RECALL_ADDR  0x00664830u
+#define EDA_RT_RECREATE_ADDR    0x00665630u
+#define EDA_RT_MGR_HEAD_ADDR    0x00938958u
+#define EDA_RT_MGR_INIT_ADDR    0x00938964u
+
+static const unsigned char EDA_RT_MGR_GET_SIG[27] = {
+    0x64, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x6A, 0xFF, 0x68, 0xCE, 0x04, 0x87, 0x00, 0x50,
+    0xF6, 0x05, 0x64, 0x89, 0x93, 0x00, 0x01, 0x64, 0x89, 0x25, 0x00, 0x00, 0x00
+};
+
+static const unsigned char EDA_RT_MGR_RECALL_SIG[24] = {
+    0x56, 0x57, 0x8B, 0xF9, 0x8B, 0x47, 0x04, 0x8B, 0x30, 0x3B, 0xF0, 0x74,
+    0x5B, 0x8D, 0x49, 0x00, 0x8B, 0x4E, 0x10, 0xE8, 0xE8, 0x0D, 0x00, 0x00
+};
+
+static const unsigned char EDA_RT_RECREATE_SIG[24] = {
+    0x51, 0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x10, 0x85, 0xC0, 0x8D, 0x5E,
+    0x10, 0x57, 0x74, 0x0C, 0x8B, 0x08, 0x50, 0xFF, 0x51, 0x08, 0xC7, 0x03
+};
+
+static inline int eda_rt_verificar_bytes(const unsigned char *get_b, const unsigned char *recall_b,
+                                         const unsigned char *recreate_b)
+{
+    if (!get_b || !recall_b || !recreate_b) return 0;
+    return memcmp(get_b, EDA_RT_MGR_GET_SIG, sizeof(EDA_RT_MGR_GET_SIG)) == 0
+        && memcmp(recall_b, EDA_RT_MGR_RECALL_SIG, sizeof(EDA_RT_MGR_RECALL_SIG)) == 0
+        && memcmp(recreate_b, EDA_RT_RECREATE_SIG, sizeof(EDA_RT_RECREATE_SIG)) == 0;
+}
+
+typedef struct EDA_LT_RT {
+    uint32_t w;           /* +0x00 m_nWidth */
+    uint32_t h;           /* +0x04 m_nHeight */
+    uint32_t color_fmt;   /* +0x08 m_eColorFormat */
+    uint32_t depth_fmt;   /* +0x0C m_eDepthFormat */
+    void *tex;            /* +0x10 m_pTexture (NULL tras ReleaseAll) */
+    void *ds;             /* +0x14 m_pDepthStencil (NULL tras ReleaseAll) */
+} EDA_LT_RT;
+
+typedef struct EDA_LT_RBNODE {
+    struct EDA_LT_RBNODE *left;    /* +0x00 */
+    struct EDA_LT_RBNODE *parent;  /* +0x04 */
+    struct EDA_LT_RBNODE *right;   /* +0x08 */
+    uint32_t key;                  /* +0x0C HRENDERTARGET */
+    EDA_LT_RT *val;                /* +0x10 CRenderTarget* */
+    unsigned char color;           /* +0x14 */
+    unsigned char is_nil;          /* +0x15 */
+    unsigned char pad[2];
+} EDA_LT_RBNODE;
+
+typedef int (*EDA_LEGIBLE_FN)(const void *p, size_t n);
+
+static inline int eda_rt_es_de_pantalla(int w, int h, int old_w, int old_h, const int viejos[][2], int n_viejos)
+{
+    if (w < 320 || h < 200 || w > 8192 || h > 8192 || w == h) return 0;
+    if (old_w >= 320 && old_h >= 200 && w == old_w && h == old_h) return 1;
+    if (viejos && n_viejos > 0) {
+        for (int i = 0; i < n_viejos; i++)
+            if (viejos[i][0] == w && viejos[i][1] == h) return 1;
+    }
+    return 0;
+}
+
+static inline int eda_rt_ajustar_arbol(void *head_ptr, int old_w, int old_h, int new_w, int new_h,
+                                       const int viejos[][2], int n_viejos, EDA_LEGIBLE_FN ok_leer)
+{
+    if (!head_ptr || !ok_leer || new_w < 320 || new_h < 200 || new_w > 8192 || new_h > 8192) return 0;
+    EDA_LT_RBNODE *head = (EDA_LT_RBNODE *)head_ptr;
+    if (!ok_leer(head, sizeof(*head)) || !head->is_nil) return 0;
+    EDA_LT_RBNODE *cur = head->left;
+    int ajustados = 0;
+    for (int paso = 0; paso < 64 && cur && cur != head; paso++) {
+        if (!ok_leer(cur, sizeof(*cur)) || cur->is_nil) break;
+        EDA_LT_RT *rt = cur->val;
+        if (rt && ok_leer(rt, sizeof(*rt)) && rt->tex == NULL && rt->ds == NULL
+            && eda_rt_es_de_pantalla((int)rt->w, (int)rt->h, old_w, old_h, viejos, n_viejos)) {
+            if ((int)rt->w != new_w || (int)rt->h != new_h) {
+                rt->w = (uint32_t)new_w;
+                rt->h = (uint32_t)new_h;
+                ajustados++;
+            }
+        }
+        /* Avance in-order idéntico a std::map::iterator::operator++ en 0x00664830 */
+        if (cur->right && ok_leer(cur->right, sizeof(*cur)) && !cur->right->is_nil) {
+            cur = cur->right;
+            for (int baj = 0; baj < 64 && cur->left && ok_leer(cur->left, sizeof(*cur)) && !cur->left->is_nil; baj++)
+                cur = cur->left;
+        } else {
+            EDA_LT_RBNODE *p = cur->parent;
+            for (int sub = 0; sub < 64 && p && ok_leer(p, sizeof(*p)) && !p->is_nil && cur == p->right; sub++) {
+                cur = p;
+                p = p->parent;
+            }
+            cur = p;
+        }
+    }
+    return ajustados;
+}
+
 #endif /* EDA_RECURSOS_H */
