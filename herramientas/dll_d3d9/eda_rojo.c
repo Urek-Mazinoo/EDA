@@ -22,8 +22,12 @@ static int g_rojo_hab = -1;                        /* -1: sin leer · 0 apagado 
 typedef struct { DWORD dir, color, n, fvf; float x0, y0, x1, y1; } RJ_P;
 static RJ_P g_rj_pant[8];
 static int g_rj_pant_n;
-static void *g_rj_rt, *g_rj_sys;
+static void *g_rj_rt, *g_rj_sys, *g_rj_dev;
 static DWORD g_rj_fmt;
+#ifndef EDA_REC_PROPIO_INC
+#define EDA_REC_PROPIO_INC() ((void)0)
+#define EDA_REC_PROPIO_DEC() ((void)0)
+#endif
 static const char *const RJ_CLASE[] = {"DrawPrimitive", "DrawIndexedPrimitive", "DrawPrimitiveUP", "DrawIndexedPrimitiveUP"};
 
 static void rojo_dibujo(DWORD dir, int clase)
@@ -62,32 +66,43 @@ static void rojo_rhw(DWORD dir, DWORD fvf, const void *v, UINT n, UINT paso)
     p->x0 = x0; p->y0 = y0; p->x1 = x1; p->y1 = y1;
 }
 
-static void rojo_soltar(void)                      /* (antes del Reset: lo del pool DEFAULT no puede quedar) */
+static void rojo_soltar_dev(void *dev)             /* (antes del Reset: lo del pool DEFAULT no puede quedar) */
 {
-    if (g_rj_rt) { ((ULONG (WINAPI *)(void *))VT(g_rj_rt)[2])(g_rj_rt); g_rj_rt = NULL; }
-    if (g_rj_sys) { ((ULONG (WINAPI *)(void *))VT(g_rj_sys)[2])(g_rj_sys); g_rj_sys = NULL; }
+    if (!dev || !g_rj_dev || g_rj_dev == dev) {
+        if (g_rj_rt) ((ULONG (WINAPI *)(void *))VT(g_rj_rt)[2])(g_rj_rt);
+        if (g_rj_sys) ((ULONG (WINAPI *)(void *))VT(g_rj_sys)[2])(g_rj_sys);
+    }
+    g_rj_rt = NULL;
+    g_rj_sys = NULL;
+    g_rj_dev = NULL;
 }
+static inline void rojo_soltar(void) { rojo_soltar_dev(NULL); }
 
 static int rojo_medir(void *dev, int *r, int *g, int *bl, int *frac)
 {
     void **vt = VT(dev);
     void *bb = NULL;
+    if (g_rj_dev && g_rj_dev != dev) { g_rj_rt = NULL; g_rj_sys = NULL; g_rj_dev = NULL; }
     if (((long (WINAPI *)(void *, UINT, UINT, UINT, void **))vt[18])(dev, 0, 0, 0, &bb) != 0 || !bb) return 0;
     DWORD d[8] = {0};
     ((long (WINAPI *)(void *, DWORD *))VT(bb)[12])(bb, d);
     if (!g_rj_rt || g_rj_fmt != d[0]) {
-        rojo_soltar();
+        rojo_soltar_dev(dev);
         g_rj_fmt = d[0];
-        if (((long (WINAPI *)(void *, UINT, UINT, DWORD, DWORD, DWORD, BOOL, void **, void *))vt[28])(
-                dev, 16, 12, d[0], 0, 0, FALSE, &g_rj_rt, NULL) != 0
+        EDA_REC_PROPIO_INC();
+        long hr_rt = ((long (WINAPI *)(void *, UINT, UINT, DWORD, DWORD, DWORD, BOOL, void **, void *))vt[28])(
+            dev, 16, 12, d[0], 0, 0, FALSE, &g_rj_rt, NULL);
+        EDA_REC_PROPIO_DEC();
+        if (hr_rt != 0
             || ((long (WINAPI *)(void *, UINT, UINT, DWORD, DWORD, void **, void *))vt[36])(
                 dev, 16, 12, d[0], 2 /* SYSTEMMEM */, &g_rj_sys, NULL) != 0) {
             apuntar("  (diag rojo) ⚠ no pude crear la superficie de medición (formato %lu): sin medición", d[0]);
-            rojo_soltar();
+            rojo_soltar_dev(dev);
             g_rojo_hab = 0;
             ((ULONG (WINAPI *)(void *))VT(bb)[2])(bb);
             return 0;
         }
+        g_rj_dev = dev;
     }
     long hr = ((long (WINAPI *)(void *, void *, const RECT *, void *, const RECT *, DWORD))vt[34])(
         dev, bb, NULL, g_rj_rt, NULL, 2 /* LINEAR */);

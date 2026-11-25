@@ -8,7 +8,8 @@
    "dll": "0.5.5",
    "resumen": "Pantalla más segura: el juego ya no se cierra al cambiar la resolución o la pantalla completa.",
    "corregidos": [
-    "Pantalla: el juego ya no se cierra al cambiar la resolución o la pantalla completa."
+    "Pantalla: el juego ya no se cierra al cambiar la resolución o la pantalla completa.",
+    "Pantalla: ahora también se puede cambiar después de jugar una stage."
    ],
    "mejoras": [
     "Pantalla completa en monitores grandes: imagen a 1920×1080, más fluida."

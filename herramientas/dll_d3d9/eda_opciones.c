@@ -429,32 +429,46 @@ static int g_pantalla_monitor = 1, g_sin_bordes;
 static LONG g_estilo_viejo;
 static RECT g_rect_viejo;
 static int opc_monitores(RECT *salida);
+static int mon_info(int k, RECT *entero, RECT *trabajo);
+static void pan_vivo_ventana(int w, int h);
 static void opc_poner_sin_bordes(int si)
 {
     HWND v = g_ventana_juego;
     if (!v) return;
     LONG estilo = GetWindowLongA(v, GWL_STYLE);
+    static int sb_mon;
     if (si) {
-        RECT mon[8], r;
-        int n = opc_monitores(mon), k = g_pantalla_monitor >= 1 && g_pantalla_monitor <= n ? g_pantalla_monitor : 1;
-        MONITORINFO mi = {sizeof(mi)};
-        if (k == 1 || !GetMonitorInfoW(MonitorFromRect(&mon[k - 1], MONITOR_DEFAULTTONEAREST), &mi))
+        RECT r;
+        int n = mon_info(g_pantalla_monitor, &r, NULL);
+        int k = g_pantalla_monitor >= 1 && g_pantalla_monitor <= n ? g_pantalla_monitor : 1;
+        if (!n) {
+            MONITORINFO mi = {sizeof(mi)};
             GetMonitorInfoW(MonitorFromWindow(v, MONITOR_DEFAULTTOPRIMARY), &mi);
-        if (k > 1) GetMonitorInfoW(MonitorFromRect(&mon[k - 1], MONITOR_DEFAULTTONEAREST), &mi);
-        r = mi.rcMonitor;                                         /* (el monitor entero, con la barra de tareas) */
+            r = mi.rcMonitor;
+        }
+        int antes = g_sin_bordes;
         if (!g_sin_bordes) { g_estilo_viejo = estilo; GetWindowRect(v, &g_rect_viejo); }
         SetWindowLongA(v, GWL_STYLE, (estilo & ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX))
                                      | WS_POPUP | WS_VISIBLE);
         SetWindowPos(v, HWND_TOP, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        if (!g_sin_bordes) apuntar("  [mazino] opciones: pantalla completa SIN BORDES (%ld×%ld, monitor %d)",
-                                   r.right - r.left, r.bottom - r.top, k);
+        if (!antes || sb_mon != k)
+            apuntar("  [mazino] opciones: pantalla completa SIN BORDES (%ld×%ld, monitor %d)",
+                    r.right - r.left, r.bottom - r.top, k);
         g_sin_bordes = 1;
+        sb_mon = k;
     } else if (g_sin_bordes) {
         g_sin_bordes = 0;
-        SetWindowLongA(v, GWL_STYLE, g_estilo_viejo);
-        SetWindowPos(v, NULL, g_rect_viejo.left, g_rect_viejo.top, g_rect_viejo.right - g_rect_viejo.left,
-                     g_rect_viejo.bottom - g_rect_viejo.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
-        apuntar("  [mazino] opciones: de vuelta a modo ventana");
+        sb_mon = 0;
+        LONG est = g_estilo_viejo ? g_estilo_viejo
+                                  : (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE);
+        SetWindowLongA(v, GWL_STYLE, est);
+        if (g_rect_viejo.right > g_rect_viejo.left && g_rect_viejo.bottom > g_rect_viejo.top)
+            SetWindowPos(v, NULL, g_rect_viejo.left, g_rect_viejo.top, g_rect_viejo.right - g_rect_viejo.left,
+                         g_rect_viejo.bottom - g_rect_viejo.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
+        else
+            SetWindowPos(v, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW);
+        if (g_res_w >= 320 && g_res_h >= 200) pan_vivo_ventana(g_res_w, g_res_h);
+        apuntar("  [mazino] opciones: de vuelta a modo ventana (monitor %d)", g_pantalla_monitor);
     }
 }
 /* (en el hilo del juego) lo pedido; y si el juego le devolvió los bordes a su ventana, se los saca otra vez */
@@ -1195,22 +1209,34 @@ static void pan_vivo_revertir(BYTE *o, const char *motivo)
     g_pan_vivo_w = g_pan_vivo_h = 0;
     pan_intento(0);
 }
-static int pan_tras_stage_ok(void) { return g_ini[0] && GetPrivateProfileIntA("pantalla", "en_vivo_tras_stage", 0, g_ini) != 0; }
+static int rec_tras_stage_seguro(char *motivo, int cap);  /* (eda_d3d9.c: red de seguridad POOL_DEFAULT) */
+static int pan_tras_stage_ok(void) { return !g_ini[0] || GetPrivateProfileIntA("pantalla", "en_vivo_tras_stage", 1, g_ini) != 0; }
 static void pan_intento(int si)                          /* (ver e2d_tras_stage_al_arrancar) */
 {
     if (g_ini[0] && g_e2d_stages > 0) WritePrivateProfileStringA("pantalla", "vivo_tras_stage_intento", si ? "1" : "0", g_ini);
 }
-static int pan_bloqueado_stage(void) { return e2d_vivo_bloqueado(pan_tras_stage_ok()); }
+static int pan_bloqueado_stage(void)
+{
+    if (e2d_vivo_bloqueado(pan_tras_stage_ok())) return 1;
+    if (g_e2d_stages > 0 && !rec_tras_stage_seguro(NULL, 0)) return 1;
+    return 0;
+}
 static void pan_vivo_tras_stage(int w, int h, const char *que)    /* (ver e2d_vivo_bloqueado: queda para el reinicio) */
 {
-    apuntar("  [mazino] pantalla en vivo · ⛔ %s %d×%d NO se aplica en vivo: ya se entró a %d Stage(s) y el Reset fallaría "
-            "(0x8876086C → el motor rehace el dispositivo y se cae). Queda para el próximo reinicio.", que, w, h, g_e2d_stages);
+    char mot[240];
+    mot[0] = 0;
+    if (pan_tras_stage_ok() && !rec_tras_stage_seguro(mot, (int)sizeof(mot)) && mot[0])
+        apuntar("  [mazino] pantalla en vivo · ⛔ %s %d×%d NO se aplica en vivo tras %d Stage(s) (red de seguridad: %s). "
+                "Queda para el próximo reinicio.", que, w, h, g_e2d_stages, mot);
+    else
+        apuntar("  [mazino] pantalla en vivo · ⛔ %s %d×%d NO se aplica en vivo: ya se entró a %d Stage(s) y [pantalla] "
+                "en_vivo_tras_stage=0. Queda para el próximo reinicio.", que, w, h, g_e2d_stages);
     WCHAR r[MAX_PATH];
     char v[32];
     wsprintfA(v, "%dx%d", w, h);
     if (ruta_juego(r, L"eda_reiniciar.txt")) escribir_archivo(r, v, (DWORD)lstrlenA(v));
     WCHAR t[200];
-    wsprintfW(t, L"Después de un Stage el cambio en vivo puede cerrar EDA: se aplica al reiniciar (Exit Game).");
+    wsprintfW(t, L"Después de un Stage el cambio en vivo no se aplicó por seguridad: queda para al reiniciar (Exit Game).");
     pan_vivo_estado(t, ORO);
     g_pan_vivo_esperando = 0;
     g_pan_vivo_w = g_pan_vivo_h = 0;
@@ -1296,6 +1322,7 @@ static void pan_vivo_tick(void)                          /* (hilo del juego, des
     g_pv.t_visto = 0;
     g_pv.visto = 0;
     pan_motor_anotar("antes", o);
+    InterlockedExchange(&g_gr_rehacer, 0);               /* ★ (24-nov) este RestartRender ya aplica el antialias nuevo */
     pan_intento(1);                                      /* ★ (20-nov) si esto cierra EDA, la próxima vez: protección */
     g_pan_vivo_desde = GetTickCount();
     e2d_viejo_agregar(g_pv.w0, g_pv.h0);                 /* (la cámara de las escenas ya creadas queda con éste) */
@@ -1964,6 +1991,7 @@ static LRESULT CALLBACK opc_proc(HWND v, UINT m, WPARAM w, LPARAM l)
                     lstrcpyW(g_estado, L"No se pudo guardar la resolución en eda_d3d9.ini.");
                     g_estado_color = ROJO_LUZ;
                 } else if (pan_cambio && g_pan_vivo_w) {
+                    InterlockedExchange(&g_gr_rehacer, 0);         /* (un solo RestartRender aplica resolución y AA) */
                     lstrcpyW(g_estado, L"Guardado. Aplicando la resolución en vivo…");
                     g_estado_color = ORO;
                 } else if (g_gr_rehacer) {

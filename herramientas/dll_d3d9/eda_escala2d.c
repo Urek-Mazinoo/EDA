@@ -26,6 +26,7 @@
  *   SetScissorRect, GetScissorRect, DrawPrimitiveUP, DrawIndexedPrimitiveUP y SetFVF. Sin hilos ni temporizadores. */
 
 #include "eda_pantalla.h"
+#include "eda_ganchos.h"
 
 static int g_e2d;                        /* [pantalla] escala2d (0 = nada de esto) */
 static int g_e2d_stage = 1;              /* [pantalla] escala2d_stage: el HUD del Stage también (1) o como hoy (0) */
@@ -179,6 +180,8 @@ static void e2d_tamano(int w, int h, const char *por)
     g_e2d_rx = (w - 800 * s) / 2;
     g_e2d_ry = (h - 600 * s) / 2;
     g_e2d_activa = activa;
+    g_e2d_cur_x = -1;
+    g_e2d_cur_y = -1;
     if (g_e2d)
         apuntar("  (escala2d) %s: backbuffer %d×%d → interfaz 800×600 ×%.3f en x %.0f · y %.0f (%.0f×%.0f) · %s", por, w, h,
                 s, g_e2d_rx, g_e2d_ry, 800 * s, 600 * s, activa ? "ACTIVA" : "nada que hacer (800×600)");
@@ -241,11 +244,19 @@ static void e2d_aplicar_vp(void *dev)
     DWORD v[6];
     e2d_vp_efectivo(v);
     if (memcmp(v, g_e2d_vp, sizeof(v))) InterlockedIncrement(&c_e2d_vp);
+    unsigned long tid = EDA_HILO_ACTUAL();
+    void *dir = NULL;
+    if (!eda_g_entrar(&g_ganchos, EDA_G_SETVIEWPORT, tid, &dir)) {
+        if (dir) ((E2D_VP)dir)(dev, v);
+        return;
+    }
     g_e2d_vp_real(dev, v);
+    eda_g_salir(&g_ganchos, EDA_G_SETVIEWPORT, tid);
 }
 
 static long WINAPI e2d_settransform(void *dev, DWORD tipo, const float *m)
 {
+    EDA_G_ENTRAR_HR(EDA_G_SETTRANSFORM, E2D_ST, dev, tipo, m);
     if (tipo == 2 /* D3DTS_VIEW */ && m && g_e2d_activa && g_e2d_stage_ahora && e2d_trazando()) {
         static float mira_antes = 1000, giro_antes = 1000;   /* (diagnóstico) a dónde mira la cámara: la 3ª columna */
         static long lineas;
@@ -259,7 +270,11 @@ static long WINAPI e2d_settransform(void *dev, DWORD tipo, const float *m)
     }
     if (tipo == 3 && m && !g_e2d_propio)                     /* ★ (Punto 6) ¿interfaz (ortográfica)? también a 800×600 */
         g_e2d_es_orto = fabsf(m[11]) < 1e-5f && fabsf(m[15] - 1) < 1e-4f;
-    if (!g_e2d_activa || tipo != 3 /* D3DTS_PROJECTION */ || !m || E2D_PASA) return g_e2d_st_real(dev, tipo, m);
+    if (!g_e2d_activa || tipo != 3 /* D3DTS_PROJECTION */ || !m || E2D_PASA) {
+        long hr = g_e2d_st_real(dev, tipo, m);
+        EDA_G_SALIR(EDA_G_SETTRANSFORM);
+        return hr;
+    }
     memcpy(g_e2d_proj, m, sizeof(g_e2d_proj));
     g_e2d_proj_hay = 1;
     float p[16];
@@ -299,20 +314,26 @@ static long WINAPI e2d_settransform(void *dev, DWORD tipo, const float *m)
     } else g_e2d_tipo = 0;
     long hr = g_e2d_st_real(dev, tipo, p);
     e2d_aplicar_vp(dev);                                     /* (el viewport depende de la proyección vigente) */
+    EDA_G_SALIR(EDA_G_SETTRANSFORM);
     return hr;
 }
 static long WINAPI e2d_gettransform(void *dev, DWORD tipo, float *m)
 {
+    EDA_G_ENTRAR_HR(EDA_G_GETTRANSFORM, E2D_GT, dev, tipo, m);
     if (g_e2d_activa && tipo == 3 && m && g_e2d_proj_hay) {
         memcpy(m, g_e2d_proj, sizeof(g_e2d_proj));
         InterlockedIncrement(&c_e2d_get);
+        EDA_G_SALIR(EDA_G_GETTRANSFORM);
         return 0;
     }
-    return g_e2d_gt_real(dev, tipo, m);
+    long hr = g_e2d_gt_real(dev, tipo, m);
+    EDA_G_SALIR(EDA_G_GETTRANSFORM);
+    return hr;
 }
 static volatile LONG g_e2d_vp_diag;                      /* (diag) viewports que pone el juego tras un cambio en vivo */
 static long WINAPI e2d_setviewport(void *dev, const DWORD *v)
 {
+    EDA_G_ENTRAR_HR(EDA_G_SETVIEWPORT, E2D_VP, dev, v);
     if (g_e2d_vp_diag > 0 && v && !E2D_PASA) {
         static DWORD vistos[24][5];
         static int n;
@@ -337,45 +358,75 @@ static long WINAPI e2d_setviewport(void *dev, const DWORD *v)
         v = nuevo;
         InterlockedIncrement(&c_e2d_vp_viejo);
     }
-    if (!g_e2d_activa || !v || E2D_PASA) return g_e2d_vp_real(dev, v);
+    if (!g_e2d_activa || !v || E2D_PASA) {
+        long hr = g_e2d_vp_real(dev, v);
+        EDA_G_SALIR(EDA_G_SETVIEWPORT);
+        return hr;
+    }
     memcpy(g_e2d_vp, v, sizeof(g_e2d_vp));
     g_e2d_vp_hay = 1;
     DWORD e[6];
     e2d_vp_efectivo(e);
     if (memcmp(e, v, sizeof(e))) InterlockedIncrement(&c_e2d_vp);
-    return g_e2d_vp_real(dev, e);
+    long hr = g_e2d_vp_real(dev, e);
+    EDA_G_SALIR(EDA_G_SETVIEWPORT);
+    return hr;
 }
 static long WINAPI e2d_getviewport(void *dev, DWORD *v)
 {
+    EDA_G_ENTRAR_HR(EDA_G_GETVIEWPORT, E2D_GVP, dev, v);
     if (g_e2d_activa && v && g_e2d_vp_hay) {
         memcpy(v, g_e2d_vp, sizeof(g_e2d_vp));
         InterlockedIncrement(&c_e2d_get);
+        EDA_G_SALIR(EDA_G_GETVIEWPORT);
         return 0;
     }
-    return g_e2d_gvp_real(dev, v);
+    long hr = g_e2d_gvp_real(dev, v);
+    EDA_G_SALIR(EDA_G_GETVIEWPORT);
+    return hr;
 }
 static long WINAPI e2d_setscissor(void *dev, const RECT *r)
 {
-    if (!g_e2d_activa || !r || E2D_PASA || g_e2d_tipo == 3 || (g_e2d_stage_ahora && !g_e2d_stage))
-        return g_e2d_sc_real(dev, r);
+    EDA_G_ENTRAR_HR(EDA_G_SETSCISSOR, E2D_SC, dev, r);
+    if (!g_e2d_activa || !r || E2D_PASA || g_e2d_tipo == 3 || (g_e2d_stage_ahora && !g_e2d_stage)) {
+        long hr = g_e2d_sc_real(dev, r);
+        EDA_G_SALIR(EDA_G_SETSCISSOR);
+        return hr;
+    }
     g_e2d_sc = *r;
     g_e2d_sc_hay = 1;
-    if (r->left == 0 && r->top == 0 && r->right >= g_e2d_w && r->bottom >= g_e2d_h) return g_e2d_sc_real(dev, r);
+    if (r->left == 0 && r->top == 0 && r->right >= g_e2d_w && r->bottom >= g_e2d_h) {
+        long hr = g_e2d_sc_real(dev, r);
+        EDA_G_SALIR(EDA_G_SETSCISSOR);
+        return hr;
+    }
     long x = r->left, y = r->top, w = r->right - r->left, h = r->bottom - r->top;
     e2d_mapear(&x, &y, &w, &h);
     RECT n = {x, y, x + w, y + h};
     InterlockedIncrement(&c_e2d_sc);
-    return g_e2d_sc_real(dev, &n);
+    long hr = g_e2d_sc_real(dev, &n);
+    EDA_G_SALIR(EDA_G_SETSCISSOR);
+    return hr;
 }
 static long WINAPI e2d_getscissor(void *dev, RECT *r)
 {
-    if (g_e2d_activa && r && g_e2d_sc_hay) { *r = g_e2d_sc; return 0; }
-    return g_e2d_gsc_real(dev, r);
+    EDA_G_ENTRAR_HR(EDA_G_GETSCISSOR, E2D_GSC, dev, r);
+    if (g_e2d_activa && r && g_e2d_sc_hay) {
+        *r = g_e2d_sc;
+        EDA_G_SALIR(EDA_G_GETSCISSOR);
+        return 0;
+    }
+    long hr = g_e2d_gsc_real(dev, r);
+    EDA_G_SALIR(EDA_G_GETSCISSOR);
+    return hr;
 }
 static long WINAPI e2d_setfvf(void *dev, DWORD fvf)
 {
+    EDA_G_ENTRAR_HR(EDA_G_SETFVF, E2D_FVF, dev, fvf);
     g_e2d_fvf = fvf;
-    return g_e2d_fvf_real(dev, fvf);
+    long hr = g_e2d_fvf_real(dev, fvf);
+    EDA_G_SALIR(EDA_G_SETFVF);
+    return hr;
 }
 
 /* los dibujos XYZRHW (ya en píxeles): los de la interfaz (≤ 800×600) → R; los de pantalla entera, igual */
@@ -452,14 +503,18 @@ static void rojo_dibujo(DWORD dir, int clase);                       /* (eda_roj
 static void rojo_rhw(DWORD dir, DWORD fvf, const void *v, UINT n, UINT paso);
 static long WINAPI e2d_dpup(void *dev, DWORD tipo, UINT prims, const void *v, UINT paso)
 {
+    EDA_G_ENTRAR_HR(EDA_G_DPUP, E2D_DPUP, dev, tipo, prims, v, paso);
     DWORD dir = (DWORD)(ULONG_PTR)__builtin_return_address(0);
     rojo_dibujo(dir, 2);
     rojo_rhw(dir, g_e2d_fvf, v, e2d_vertices(tipo, prims), paso);
-    return g_e2d_dpup_real(dev, tipo, prims, e2d_rhw(v, e2d_vertices(tipo, prims), paso), paso);
+    long hr = g_e2d_dpup_real(dev, tipo, prims, e2d_rhw(v, e2d_vertices(tipo, prims), paso), paso);
+    EDA_G_SALIR(EDA_G_DPUP);
+    return hr;
 }
 static long WINAPI e2d_dipup(void *dev, DWORD tipo, UINT minimo, UINT nv, UINT prims, const void *idx, DWORD fmt,
                              const void *v, UINT paso)
 {
+    EDA_G_ENTRAR_HR(EDA_G_DIPUP, E2D_DIPUP, dev, tipo, minimo, nv, prims, idx, fmt, v, paso);
     const void *nuevo = v;
     DWORD dir = (DWORD)(ULONG_PTR)__builtin_return_address(0);
     rojo_dibujo(dir, 3);
@@ -469,7 +524,9 @@ static long WINAPI e2d_dipup(void *dev, DWORD tipo, UINT minimo, UINT nv, UINT p
         const void *t = e2d_rhw(b + minimo * paso, nv, paso);
         if (t != b + minimo * paso) nuevo = (const BYTE *)t - minimo * paso;   /* (los índices siguen valiendo) */
     }
-    return g_e2d_dipup_real(dev, tipo, minimo, nv, prims, idx, fmt, nuevo, paso);
+    long hr = g_e2d_dipup_real(dev, tipo, minimo, nv, prims, idx, fmt, nuevo, paso);
+    EDA_G_SALIR(EDA_G_DIPUP);
+    return hr;
 }
 
 /* ── el mouse ── la posición de Windows (cliente) → la de la interfaz, y al revés */
@@ -674,7 +731,11 @@ static void e2d_barras(void *dev)
 {
     if (!g_e2d_res_fase || !g_e2d_activa || !g_e2d_gvp_real || !g_e2d_vp_real || (g_e2d_rx < 1 && g_e2d_ry < 1)) return;
     DWORD antes[6], todo[6] = {0, 0, (DWORD)g_e2d_w, (DWORD)g_e2d_h, 0, 0x3F800000u /* 1.0f */};
-    if (g_e2d_gvp_real(dev, antes) != 0) return;
+    E2D_GVP gvp = (E2D_GVP)eda_g_directo(&g_ganchos, EDA_G_GETVIEWPORT);
+    E2D_VP svp = (E2D_VP)eda_g_directo(&g_ganchos, EDA_G_SETVIEWPORT);
+    if (!gvp) gvp = g_e2d_gvp_real;
+    if (!svp) svp = g_e2d_vp_real;
+    if (gvp(dev, antes) != 0) return;
     LONG x0 = (LONG)(g_e2d_rx + 0.5f), y0 = (LONG)(g_e2d_ry + 0.5f);
     LONG x1 = (LONG)(g_e2d_rx + 800 * g_e2d_s + 0.5f), y1 = (LONG)(g_e2d_ry + 600 * g_e2d_s + 0.5f);
     LONG r[4][4] = {{0, 0, x0, g_e2d_h}, {x1, 0, g_e2d_w, g_e2d_h}, {x0, 0, x1, y0}, {x0, y1, x1, g_e2d_h}};
@@ -683,10 +744,10 @@ static void e2d_barras(void *dev)
     for (int i = 0; i < 4; i++)
         if (r[i][2] > r[i][0] && r[i][3] > r[i][1]) { memcpy(usar[n], r[i], sizeof(r[i])); n++; }
     if (!n) return;
-    g_e2d_vp_real(dev, todo);
+    svp(dev, todo);
     ((long (WINAPI *)(void *, DWORD, const void *, DWORD, DWORD, float, DWORD))VT(dev)[43])(dev, n, usar, 1 /* TARGET */,
                                                                                            0xFF000000u, 1.0f, 0);
-    g_e2d_vp_real(dev, antes);
+    svp(dev, antes);
     InterlockedIncrement(&c_e2d_barras);
 }
 static void e2d_confirmar(void);
@@ -837,8 +898,9 @@ static E2D_SETRT_F g_e2d_rt_real;
 static long c_e2d_rt_fuera;
 static long WINAPI e2d_setrt(void *dev, DWORD i, void *sup)
 {
+    EDA_G_ENTRAR_HR(EDA_G_SETRT, E2D_SETRT_F, dev, i, sup);
     long hr = g_e2d_rt_real(dev, i, sup);
-    if (i != 0 || hr != 0) return hr;
+    if (i != 0 || hr != 0) { EDA_G_SALIR(EDA_G_SETRT); return hr; }
     DWORD d[8] = {0};
     int w = 0, h = 0;
     if (sup && ((long (WINAPI *)(void *, void *))VT(sup)[12])(sup, d) == 0) { w = (int)d[6]; h = (int)d[7]; }
@@ -858,6 +920,7 @@ static long WINAPI e2d_setrt(void *dev, DWORD i, void *sup)
                     (unsigned long)dir, g_e2d_w, g_e2d_h, g_e2d_activa ? "ACTIVA" : "×1", g_e2d_stage_ahora ? "en el Stage" : "fuera del Stage");
         }
     }
+    EDA_G_SALIR(EDA_G_SETRT);
     return hr;
 }
 
@@ -870,19 +933,51 @@ static void e2d_dispositivo(void **vt, const void *pp)
     if (p && p[0] && p[1]) e2d_tamano((int)p[0], (int)p[1], "dispositivo");
     g_e2d_medido = 0;                                        /* (y el real, en el próximo Present) */
     e2d_prop_enganchar();
-    if (vt && !g_e2d_rt_real) poner(vt, E2D_SETRT, (void *)e2d_setrt, (void **)&g_e2d_rt_real);
-    if (!vt || g_e2d_st_real) return;
-    poner(vt, E2D_SETTRANSFORM, (void *)e2d_settransform, (void **)&g_e2d_st_real);
-    poner(vt, E2D_GETTRANSFORM, (void *)e2d_gettransform, (void **)&g_e2d_gt_real);
-    poner(vt, E2D_SETVIEWPORT, (void *)e2d_setviewport, (void **)&g_e2d_vp_real);
-    poner(vt, E2D_GETVIEWPORT, (void *)e2d_getviewport, (void **)&g_e2d_gvp_real);
-    poner(vt, E2D_SETSCISSOR, (void *)e2d_setscissor, (void **)&g_e2d_sc_real);
-    poner(vt, E2D_GETSCISSOR, (void *)e2d_getscissor, (void **)&g_e2d_gsc_real);
-    poner(vt, E2D_I_DPUP, (void *)e2d_dpup, (void **)&g_e2d_dpup_real);
-    poner(vt, E2D_I_DIPUP, (void *)e2d_dipup, (void **)&g_e2d_dipup_real);
-    poner(vt, E2D_SETFVF, (void *)e2d_setfvf, (void **)&g_e2d_fvf_real);
-    apuntar("  (escala2d) ★ EXPERIMENTAL: enganchados Set/GetTransform, Set/GetViewport, Set/GetScissorRect, "
-            "DrawPrimitiveUP, DrawIndexedPrimitiveUP y SetFVF · HUD del Stage %s", g_e2d_stage ? "también" : "como hoy");
+    if (!vt) return;
+    if (vt[E2D_SETRT] != (void *)e2d_setrt) {
+        poner(vt, E2D_SETRT, (void *)e2d_setrt, (void **)&g_e2d_rt_real);
+        eda_g_registrar(&g_ganchos, EDA_G_SETRT, E2D_SETRT, "SetRenderTarget", (void *)e2d_setrt, (void *)g_e2d_rt_real);
+    }
+    int primera = !g_e2d_st_real;
+    if (vt[E2D_SETTRANSFORM] != (void *)e2d_settransform) {
+        poner(vt, E2D_SETTRANSFORM, (void *)e2d_settransform, (void **)&g_e2d_st_real);
+        eda_g_registrar(&g_ganchos, EDA_G_SETTRANSFORM, E2D_SETTRANSFORM, "SetTransform", (void *)e2d_settransform, (void *)g_e2d_st_real);
+    }
+    if (vt[E2D_GETTRANSFORM] != (void *)e2d_gettransform) {
+        poner(vt, E2D_GETTRANSFORM, (void *)e2d_gettransform, (void **)&g_e2d_gt_real);
+        eda_g_registrar(&g_ganchos, EDA_G_GETTRANSFORM, E2D_GETTRANSFORM, "GetTransform", (void *)e2d_gettransform, (void *)g_e2d_gt_real);
+    }
+    if (vt[E2D_SETVIEWPORT] != (void *)e2d_setviewport) {
+        poner(vt, E2D_SETVIEWPORT, (void *)e2d_setviewport, (void **)&g_e2d_vp_real);
+        eda_g_registrar(&g_ganchos, EDA_G_SETVIEWPORT, E2D_SETVIEWPORT, "SetViewport", (void *)e2d_setviewport, (void *)g_e2d_vp_real);
+    }
+    if (vt[E2D_GETVIEWPORT] != (void *)e2d_getviewport) {
+        poner(vt, E2D_GETVIEWPORT, (void *)e2d_getviewport, (void **)&g_e2d_gvp_real);
+        eda_g_registrar(&g_ganchos, EDA_G_GETVIEWPORT, E2D_GETVIEWPORT, "GetViewport", (void *)e2d_getviewport, (void *)g_e2d_gvp_real);
+    }
+    if (vt[E2D_SETSCISSOR] != (void *)e2d_setscissor) {
+        poner(vt, E2D_SETSCISSOR, (void *)e2d_setscissor, (void **)&g_e2d_sc_real);
+        eda_g_registrar(&g_ganchos, EDA_G_SETSCISSOR, E2D_SETSCISSOR, "SetScissorRect", (void *)e2d_setscissor, (void *)g_e2d_sc_real);
+    }
+    if (vt[E2D_GETSCISSOR] != (void *)e2d_getscissor) {
+        poner(vt, E2D_GETSCISSOR, (void *)e2d_getscissor, (void **)&g_e2d_gsc_real);
+        eda_g_registrar(&g_ganchos, EDA_G_GETSCISSOR, E2D_GETSCISSOR, "GetScissorRect", (void *)e2d_getscissor, (void *)g_e2d_gsc_real);
+    }
+    if (vt[E2D_I_DPUP] != (void *)e2d_dpup) {
+        poner(vt, E2D_I_DPUP, (void *)e2d_dpup, (void **)&g_e2d_dpup_real);
+        eda_g_registrar(&g_ganchos, EDA_G_DPUP, E2D_I_DPUP, "DrawPrimitiveUP", (void *)e2d_dpup, (void *)g_e2d_dpup_real);
+    }
+    if (vt[E2D_I_DIPUP] != (void *)e2d_dipup) {
+        poner(vt, E2D_I_DIPUP, (void *)e2d_dipup, (void **)&g_e2d_dipup_real);
+        eda_g_registrar(&g_ganchos, EDA_G_DIPUP, E2D_I_DIPUP, "DrawIndexedPrimitiveUP", (void *)e2d_dipup, (void *)g_e2d_dipup_real);
+    }
+    if (vt[E2D_SETFVF] != (void *)e2d_setfvf) {
+        poner(vt, E2D_SETFVF, (void *)e2d_setfvf, (void **)&g_e2d_fvf_real);
+        eda_g_registrar(&g_ganchos, EDA_G_SETFVF, E2D_SETFVF, "SetFVF", (void *)e2d_setfvf, (void *)g_e2d_fvf_real);
+    }
+    if (primera)
+        apuntar("  (escala2d) ★ EXPERIMENTAL: enganchados Set/GetTransform, Set/GetViewport, Set/GetScissorRect, "
+                "DrawPrimitiveUP, DrawIndexedPrimitiveUP y SetFVF · HUD del Stage %s", g_e2d_stage ? "también" : "como hoy");
 }
 static void e2d_reafirmar(void **vt, int (*reafirmar_fn)(void **, int, void *, void **, const char *))
 {
@@ -982,8 +1077,8 @@ static void e2d_leer_ini(const char *ini)
                     g_res_w, g_res_h);
         return;
     }
-    {                                                        /* ★ (20-nov) ¿la sesión anterior se cayó en un intento? */
-        int perm = GetPrivateProfileIntA("pantalla", "en_vivo_tras_stage", 0, ini);
+    {                                                        /* ★ (24-nov) ¿la sesión anterior se cayó en un intento? */
+        int perm = GetPrivateProfileIntA("pantalla", "en_vivo_tras_stage", 1, ini);
         int pend = GetPrivateProfileIntA("pantalla", "vivo_tras_stage_intento", 0, ini);
         if (pend) {
             int nuevo = e2d_tras_stage_al_arrancar(perm, pend);

@@ -26,6 +26,14 @@
  *     cuando cambia: 0x6D6532; tope 512 en 0x6D655B). */
 
 #include "eda_pantalla.h"
+#include "eda_ganchos.h"
+#ifndef EDA_REC_ALTA_TEX
+#define EDA_REC_ALTA_TEX(obj, ret_addr, bytes) ((void)0)
+#endif
+#ifndef EDA_REC_PROPIO_INC
+#define EDA_REC_PROPIO_INC() ((void)0)
+#define EDA_REC_PROPIO_DEC() ((void)0)
+#endif
 
 static int g_gr_aniso = 1;            /* 1 = apagado; 2..16 */
 static int g_gr_tri = 0;
@@ -185,22 +193,33 @@ static int gr_ui_es_imagen(void *tex, DWORD etapa, int es_glifo, DWORD desde)
     return g_gr_ui_clamp && tex && etapa == 0 && !es_glifo && g_e2d_es_orto && g_e2d_activa && desde == GR_UI_DESDE;
 }
 static long WINAPI gr_sss(void *dev, DWORD s, DWORD tipo, DWORD v);
+static void gr_sss_directo(void *dev, DWORD s, DWORD tipo, DWORD v)
+{
+    unsigned long tid = EDA_HILO_ACTUAL();
+    void *dir = NULL;
+    if (!eda_g_entrar(&g_ganchos, EDA_G_SETSAMPLER, tid, &dir)) {
+        if (dir) ((M_SAMPLER)dir)(dev, s, tipo, v);
+        return;
+    }
+    g_gr_sss_real(dev, s, tipo, v);
+    eda_g_salir(&g_ganchos, EDA_G_SETSAMPLER, tid);
+}
 static void gr_glifo_poner(void *dev, DWORD s, int si)
 {
     if (s >= 8 || !g_gr_sss_real || si == g_gr_glifo_et[s]) return;
     if (si && g_gr_glifo_et[s]) gr_glifo_poner(dev, s, 0);         /* (de letra a imagen o al revés: primero lo del juego) */
     if (si == 2) {                                                 /* ★ (20-nov) imagen de la interfaz: sólo el borde */
-        g_gr_sss_real(dev, s, 1, 3 /* CLAMP */);
-        g_gr_sss_real(dev, s, 2, 3);
+        gr_sss_directo(dev, s, 1, 3 /* CLAMP */);
+        gr_sss_directo(dev, s, 2, 3);
         g_gr_glifo_et[s] = 2;
         InterlockedIncrement(&c_gr_ui_clamp);
         return;
     }
     if (si) {
-        g_gr_sss_real(dev, s, 1, 3 /* CLAMP */);
-        g_gr_sss_real(dev, s, 2, 3);
-        g_gr_sss_real(dev, s, 5, 2 /* LINEAR */);
-        g_gr_sss_real(dev, s, 6, 2);
+        gr_sss_directo(dev, s, 1, 3 /* CLAMP */);
+        gr_sss_directo(dev, s, 2, 3);
+        gr_sss_directo(dev, s, 5, 2 /* LINEAR */);
+        gr_sss_directo(dev, s, 6, 2);
         g_gr_glifo_et[s] = 1;
         InterlockedIncrement(&c_gr_glifos);
         return;
@@ -212,11 +231,12 @@ static void gr_glifo_poner(void *dev, DWORD s, int si)
 }
 static long WINAPI gr_sss(void *dev, DWORD s, DWORD tipo, DWORD v)
 {
+    EDA_G_ENTRAR_HR(EDA_G_SETSAMPLER, M_SAMPLER, dev, s, tipo, v);
     if (s < 8 && (tipo == 1 || tipo == 2 || tipo == 5 || tipo == 6)) {
         g_gr_ss_juego[s][tipo] = v;
         g_gr_ss_sabido[s][tipo] = 1;
-        if (g_gr_glifo_et[s] == 1) return 0;             /* (con una letra puesta queda CLAMP/LINEAL; lo pedido vuelve después) */
-        if (g_gr_glifo_et[s] == 2 && (tipo == 1 || tipo == 2)) return 0;   /* (imagen: el borde queda CLAMP; el filtro, el del juego) */
+        if (g_gr_glifo_et[s] == 1) { EDA_G_SALIR(EDA_G_SETSAMPLER); return 0; }             /* (con una letra puesta queda CLAMP/LINEAL; lo pedido vuelve después) */
+        if (g_gr_glifo_et[s] == 2 && (tipo == 1 || tipo == 2)) { EDA_G_SALIR(EDA_G_SETSAMPLER); return 0; }   /* (imagen: el borde queda CLAMP; el filtro, el del juego) */
     }
     int an = gr_limitar_aniso(g_gr_aniso);
     if (tipo == 6 /* MINFILTER */ && v == 2 /* LINEAR */ && an > 1) {
@@ -224,12 +244,15 @@ static long WINAPI gr_sss(void *dev, DWORD s, DWORD tipo, DWORD v)
         g_gr_sss_real(dev, s, 10 /* MAXANISOTROPY */, (DWORD)an);
         if (g_gr_nitidez) { float b = -0.5f; DWORD d; memcpy(&d, &b, 4); g_gr_sss_real(dev, s, 8 /* MIPMAPLODBIAS */, d); }
         InterlockedIncrement(&c_gr_aniso);
+        EDA_G_SALIR(EDA_G_SETSAMPLER);
         return hr;
     }
     if (tipo == 6 && g_gr_nitidez && v == 2) { float b = -0.5f; DWORD d; memcpy(&d, &b, 4); g_gr_sss_real(dev, s, 8, d); }
     if (tipo == 10 /* MAXANISOTROPY */ && an > 1 && v < (DWORD)an) v = (DWORD)an;
     if (tipo == 7 /* MIPFILTER */ && v == 1 /* POINT */ && g_gr_tri) { v = 2; InterlockedIncrement(&c_gr_tri); }
-    return g_gr_sss_real(dev, s, tipo, v);
+    long hr = g_gr_sss_real(dev, s, tipo, v);
+    EDA_G_SALIR(EDA_G_SETSAMPLER);
+    return hr;
 }
 
 /* lo que la placa puede: anisotrópico (D3DCAPS9 +64 TextureFilterCaps bit 0x400, +108 MaxAnisotropy) y MSAA */
@@ -383,12 +406,14 @@ static long gr_reset_plan_b(void *dev, void *pp, long (WINAPI *reset_fn)(void *,
 
 /* ── 2. el brillo, en el Present ── */
 static void *g_gr_bloque, *g_gr_bloque_dev;
-static void gr_soltar(void)                 /* (antes del Reset) */
+static void gr_soltar_dev(void *dev)        /* (antes del Reset: sólo si pertenece a este dispositivo) */
 {
-    if (g_gr_bloque && g_gr_bloque_dev) ((M_SB)VT(g_gr_bloque)[2])(g_gr_bloque);
+    if (g_gr_bloque && g_gr_bloque_dev && (!dev || g_gr_bloque_dev == dev))
+        ((M_SB)VT(g_gr_bloque)[2])(g_gr_bloque);
     g_gr_bloque = NULL;
     g_gr_bloque_dev = NULL;
 }
+static inline void gr_soltar(void) { gr_soltar_dev(NULL); }
 /* el color del cuadrado y la mezcla: k > 1 → dst·(1 + (k−1)) con DESTCOLOR / ONE; k < 1 → dst·k con ZERO / SRCCOLOR */
 static void gr_brillo_mezcla(int brillo, DWORD *color, DWORD *src, DWORD *dst)
 {
@@ -411,7 +436,11 @@ static void gr_brillo_dibujar(void *dev)
     struct { float x, y, z, rhw; DWORD c; } q[4] = {
         {-0.5f, -0.5f, 0, 1, color}, {w - 0.5f, -0.5f, 0, 1, color}, {-0.5f, h - 0.5f, 0, 1, color}, {w - 0.5f, h - 0.5f, 0, 1, color}};
     if (g_gr_bloque && g_gr_bloque_dev != dev) g_gr_bloque = NULL;   /* (de otro dispositivo: ni tocarlo) */
-    if (!g_gr_bloque && ((M_CSB)vt[I_CREATESB])(dev, 1 /* D3DSBT_ALL */, &g_gr_bloque) != 0) g_gr_bloque = NULL;
+    if (!g_gr_bloque) {
+        EDA_REC_PROPIO_INC();
+        if (((M_CSB)vt[I_CREATESB])(dev, 1 /* D3DSBT_ALL */, &g_gr_bloque) != 0) g_gr_bloque = NULL;
+        EDA_REC_PROPIO_DEC();
+    }
     g_gr_bloque_dev = dev;
     if (!g_gr_bloque) return;
     ((M_SB)VT(g_gr_bloque)[4])(g_gr_bloque);                        /* Capture */
@@ -462,19 +491,23 @@ static void gr_desc(void *sup, int *w, int *h, DWORD *ms)
 }
 static long WINAPI gr_ctex(void *dev, UINT w, UINT h, UINT niv, DWORD uso, DWORD fmt, DWORD pool, void **t, void *c)
 {
+    EDA_G_ENTRAR_HR(EDA_G_CTEX, M_CTEX, dev, w, h, niv, uso, fmt, pool, t, c);
+    DWORD dir = (DWORD)(ULONG_PTR)__builtin_return_address(0);
     long hr = g_gr_ctex_real(dev, w, h, niv, uso, fmt, pool, t, c);
+    if (hr == 0 && t && *t && pool == 0) EDA_REC_ALTA_TEX(*t, (unsigned long)dir, (unsigned long)w * (unsigned long)h * 4ul);
     if (hr == 0 && t && *t && !(uso & 1)) gr_tx_nueva(*t, fmt, pool);
     if ((uso & 1 /* RENDERTARGET */) && hr == 0 && t && *t && g_gr_rt_tex_n < 16) g_gr_rt_tex[g_gr_rt_tex_n++] = *t;
-    if ((uso & 1 /* RENDERTARGET */) && g_gr_diag_rt < 40) {
+    if ((uso & 1 /* RENDERTARGET */) && g_gr_diag_rt < 40 && g_diagnostico) {
         g_gr_diag_rt++;
         apuntar("  (diag gráficos) textura RENDER TARGET %u×%u · formato %lu · niveles %u · backbuffer %d×%d · pide 0x%08lX → 0x%08lx",
-                w, h, (unsigned long)fmt, niv, g_e2d_w, g_e2d_h, (unsigned long)(ULONG_PTR)__builtin_return_address(0),
-                (unsigned long)hr);
+                w, h, (unsigned long)fmt, niv, g_e2d_w, g_e2d_h, (unsigned long)dir, (unsigned long)hr);
     }
+    EDA_G_SALIR(EDA_G_CTEX);
     return hr;
 }
 static long WINAPI gr_stretch(void *dev, void *src, const RECT *rs, void *dst, const RECT *rd, DWORD filtro)
 {
+    EDA_G_ENTRAR_HR(EDA_G_STRETCH, M_STRETCH, dev, src, rs, dst, rd, filtro);
     DWORD dir = (DWORD)(ULONG_PTR)__builtin_return_address(0);
     int nuevo = 1;
     for (int i = 0; i < g_gr_sr_n; i++) if (g_gr_sr_dir[i] == dir) nuevo = 0;
@@ -489,6 +522,7 @@ static long WINAPI gr_stretch(void *dev, void *src, const RECT *rs, void *dst, c
                 sw, sh, (unsigned long)sms, rs ? " (una parte)" : "", dw, dh, rd ? " (una parte)" : "", (unsigned long)filtro,
                 (unsigned long)hr);
     }
+    EDA_G_SALIR(EDA_G_STRETCH);
     return hr;
 }
 
@@ -907,10 +941,16 @@ static void gr_diag_volcar(void *tex, DWORD dir)
 }
 static long WINAPI gr_settex(void *dev, DWORD etapa, void *tex)
 {
+    EDA_G_ENTRAR_HR(EDA_G_SETTEX, M_SETTEX, dev, etapa, tex);
     if (tex && g_gr_volcar && g_e2d_es_orto) gr_diag_volcar(tex, (DWORD)(ULONG_PTR)__builtin_return_address(0));
     if (tex && g_gr_letras == 2 && g_gr_tx_n) {
         void *g = gr_tx_usar(dev, tex);
-        if (g) { InterlockedIncrement(&c_gr_letras); return g_gr_settex_real(dev, etapa, g); }
+        if (g) {
+            InterlockedIncrement(&c_gr_letras);
+            long hr = g_gr_settex_real(dev, etapa, g);
+            EDA_G_SALIR(EDA_G_SETTEX);
+            return hr;
+        }
     }
     int es_glifo = 0;
     if (tex && g_gr_letras) {
@@ -967,7 +1007,9 @@ static long WINAPI gr_settex(void *dev, DWORD etapa, void *tex)
                 break;
             }
     }
-    return g_gr_settex_real(dev, etapa, tex);
+    long hr = g_gr_settex_real(dev, etapa, tex);
+    EDA_G_SALIR(EDA_G_SETTEX);
+    return hr;
 }
 
 /* ★ (20-nov) LA CAUSA DEL CIERRE AL CAMBIAR LA RESOLUCIÓN DESPUÉS DE UN STAGE. Direct3D9 no borra un recurso del pool
@@ -999,7 +1041,8 @@ static int gr_reset_desligar(void *dev, void *sss_real, void *rt_real, char *dia
     if (diag && tam) diag[0] = 0;
 #define GR_ANOTAR(...) do { if (diag && k < tam - 48) k += wsprintfA(diag + k, __VA_ARGS__); } while (0)
     /* texturas: etapas 0..15, el mapa de desplazamiento (256) y las 4 de vértices (257..260) */
-    GR_M_SET2 settex = g_gr_settex_real ? (GR_M_SET2)g_gr_settex_real : (GR_M_SET2)vt[65];
+    void *d_st = eda_g_directo(&g_ganchos, EDA_G_SETTEX);
+    GR_M_SET2 settex = d_st ? (GR_M_SET2)d_st : (g_gr_settex_real ? (GR_M_SET2)g_gr_settex_real : (GR_M_SET2)vt[65]);
     for (DWORD i = 0; i < 21; i++) {
         DWORD s = i < 16 ? i : 256 + (i - 16);
         void *t = NULL;
@@ -1013,25 +1056,30 @@ static int gr_reset_desligar(void *dev, void *sss_real, void *rt_real, char *dia
         settex(dev, s, NULL);
     }
     /* búferes de vértices */
+    void *d_sss = eda_g_directo(&g_ganchos, EDA_G_SSS);
+    void *sss_fn = d_sss ? d_sss : (sss_real ? sss_real : vt[100]);
     for (UINT i = 0; i < 16; i++) {
         void *vb = NULL;
         UINT desde = 0, paso = 0;
         if (((long (WINAPI *)(void *, UINT, void **, UINT *, UINT *))vt[101])(dev, i, &vb, &desde, &paso) != 0 || !vb) continue;
         if (gr_desc_pool(vb, 13, 0, d) && d[3] == 0) { def++; GR_ANOTAR(" vértices stream %u %lu B;", i, d[4]); }
         ((ULONG (WINAPI *)(void *))VT(vb)[2])(vb);
-        ((long (WINAPI *)(void *, UINT, void *, UINT, UINT))(sss_real ? sss_real : vt[100]))(dev, i, NULL, 0, 0);
+        ((long (WINAPI *)(void *, UINT, void *, UINT, UINT))sss_fn)(dev, i, NULL, 0, 0);
     }
     /* índices */
     {
         void *ib = NULL;
-        if (((long (WINAPI *)(void *, void **))vt[105])(dev, &ib) == 0 && ib) {
+        void *d_gib = eda_g_directo(&g_ganchos, EDA_G_GETIB);
+        void *d_sib = eda_g_directo(&g_ganchos, EDA_G_SETIB);
+        if (((long (WINAPI *)(void *, void **))(d_gib ? d_gib : vt[105]))(dev, &ib) == 0 && ib) {
             if (gr_desc_pool(ib, 13, 0, d) && d[3] == 0) { def++; GR_ANOTAR(" índices %lu B;", d[4]); }
             ((ULONG (WINAPI *)(void *))VT(ib)[2])(ib);
-            ((long (WINAPI *)(void *, void *))vt[104])(dev, NULL);
+            ((long (WINAPI *)(void *, void *))(d_sib ? d_sib : vt[104]))(dev, NULL);
         }
     }
     /* destinos: 1..3 sin nada; el 0 otra vez el backbuffer (si quedó una textura) */
-    GR_M_SET2 setrt = rt_real ? (GR_M_SET2)rt_real : (GR_M_SET2)vt[37];
+    void *d_rt = eda_g_directo(&g_ganchos, EDA_G_SETRT);
+    GR_M_SET2 setrt = d_rt ? (GR_M_SET2)d_rt : (rt_real ? (GR_M_SET2)rt_real : (GR_M_SET2)vt[37]);
     for (DWORD i = 1; i < 4; i++) {
         void *sup = NULL;
         if (((GR_M_GET2)vt[38])(dev, i, &sup) != 0 || !sup) continue;
@@ -1066,10 +1114,17 @@ static int gr_reset_desligar(void *dev, void *sss_real, void *rt_real, char *dia
 
 static void gr_diag_enganchar(void **vt)
 {
-    if (vt && !g_gr_settex_real && (g_gr_letras || g_diagnostico)) poner(vt, 65 /* SetTexture */, (void *)gr_settex, (void **)&g_gr_settex_real);
-    if (vt && !g_gr_ctex_real && (g_gr_letras || g_diagnostico)) poner(vt, 23 /* CreateTexture */, (void *)gr_ctex, (void **)&g_gr_ctex_real);
-    if (!g_diagnostico || !vt || g_gr_stretch_real) return;
+    if (vt && vt[65] != (void *)gr_settex && (g_gr_letras || g_diagnostico)) {
+        poner(vt, 65 /* SetTexture */, (void *)gr_settex, (void **)&g_gr_settex_real);
+        eda_g_registrar(&g_ganchos, EDA_G_SETTEX, 65, "SetTexture", (void *)gr_settex, (void *)g_gr_settex_real);
+    }
+    if (vt && vt[23] != (void *)gr_ctex) {
+        poner(vt, 23 /* CreateTexture */, (void *)gr_ctex, (void **)&g_gr_ctex_real);
+        eda_g_registrar(&g_ganchos, EDA_G_CTEX, 23, "CreateTexture", (void *)gr_ctex, (void *)g_gr_ctex_real);
+    }
+    if (!g_diagnostico || !vt || vt[34] == (void *)gr_stretch) return;
     poner(vt, 34 /* StretchRect */, (void *)gr_stretch, (void **)&g_gr_stretch_real);
+    eda_g_registrar(&g_ganchos, EDA_G_STRETCH, 34, "StretchRect", (void *)gr_stretch, (void *)g_gr_stretch_real);
     apuntar("  (diag gráficos) mirando CreateTexture (render targets) y StretchRect");
 }
 
@@ -1080,7 +1135,10 @@ static void gr_dispositivo(void **vt, void *dev)
     gr_letras_soltar();                                      /* (los gemelos eran del dispositivo anterior) */
     gr_diag_enganchar(vt);
     gr_caps(dev);
-    poner(vt, GR_I_SETSAMPLER, (void *)gr_sss, (void **)&g_gr_sss_real);
+    if (vt[GR_I_SETSAMPLER] != (void *)gr_sss) {
+        poner(vt, GR_I_SETSAMPLER, (void *)gr_sss, (void **)&g_gr_sss_real);
+        eda_g_registrar(&g_ganchos, EDA_G_SETSAMPLER, GR_I_SETSAMPLER, "SetSamplerState", (void *)gr_sss, (void *)g_gr_sss_real);
+    }
     gr_destello_aplicar();
 }
 static void gr_reafirmar(void **vt, int (*reafirmar_fn)(void **, int, void *, void **, const char *))
