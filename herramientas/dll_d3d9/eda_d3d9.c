@@ -1374,7 +1374,36 @@ static void __attribute__((thiscall)) boton_opc(void *pantalla, void *ev)
     g_opc_por = "botón del lobby";
     opciones_o_chat();
 }
-static BYTE g_delegados[3][0x18];
+/* ★ (24-nov, EXPERIMENTAL, [pvp] batalla=1; APAGADO por defecto) la pestaña Battle del lobby (control 103 de la
+ *   lista 101, channellobby.xml:126; documentacion/PVP_BATTLE_UI.md): el lobby no la ata a nada. Se ata con el
+ *   mismo delegado que Clan / Messenger / Options a una función que manda «/batalla» por el chat. 0x4DF900 sólo
+ *   guarda (control → manejador) en el mapa del evento de la pantalla (0x4DF5B0, sin buscar el control), así que
+ *   atar un id que nunca avise no rompe nada. Va en los eventos 3 (botón) y 5 (fila de lista: así se atan las
+ *   filas de la sala): no se midió cuál manda un botón DENTRO de una lista. */
+static int g_pvp_batalla;
+static DWORD g_batalla_ultimo;
+static void __attribute__((thiscall)) boton_batalla(void *pantalla, void *ev)
+{
+    (void)pantalla; (void)ev;
+    DWORD ahora = GetTickCount();
+    if (ahora - g_batalla_ultimo < 500) return;              /* (los dos eventos de un mismo clic: uno solo) */
+    g_batalla_ultimo = ahora;
+    apuntar("  [pvp] pestaña Batalla PvP → «/batalla»");
+    chat("/batalla");
+}
+/* «Escenario» (102): el server tiene que saber que se volvió a la pestaña de siempre (la sala que se cree ahí es
+ *   normal). Manda «/escenario», que el server no contesta. */
+static DWORD g_escenario_ultimo;
+static void __attribute__((thiscall)) boton_escenario(void *pantalla, void *ev)
+{
+    (void)pantalla; (void)ev;
+    DWORD ahora = GetTickCount();
+    if (ahora - g_escenario_ultimo < 500) return;
+    g_escenario_ultimo = ahora;
+    apuntar("  [pvp] pestaña Escenario → «/escenario»");
+    chat("/escenario");
+}
+static BYTE g_delegados[7][0x18];
 static void msn_saludar(void);
 
 static void __attribute__((thiscall)) mi_unir_lobby(void *lobby, int evento, int control, void *delegado)
@@ -1388,6 +1417,19 @@ static void __attribute__((thiscall)) mi_unir_lobby(void *lobby, int evento, int
         JUEGO(J_UNIR, 0x4DF900)(lobby, 3, 3 + i, g_delegados[i]);
     }
     apuntar("  [mazino] lobby: Clan, Messenger y Options unidos");
+    if (g_pvp_batalla) {
+        int eventos[2] = {3, 5};
+        for (int i = 0; i < 2; i++) {
+            memcpy(g_delegados[3 + i], delegado, 0x18);
+            *(void **)(g_delegados[3 + i] + 8) = (void *)boton_batalla;
+            JUEGO(J_UNIR, 0x4DF900)(lobby, eventos[i], 103, g_delegados[3 + i]);
+            memcpy(g_delegados[5 + i], delegado, 0x18);
+            *(void **)(g_delegados[5 + i] + 8) = (void *)boton_escenario;
+            JUEGO(J_UNIR, 0x4DF900)(lobby, eventos[i], 102, g_delegados[5 + i]);
+        }
+        apuntar("  [pvp] lobby: Battle (103) → «/batalla» y Escenario (102) → «/escenario» (eventos 3 y 5)");
+        chat("/pvp hola");                               /* (el server sabe que esta dll entiende «[PVP]») */
+    }
     msn_saludar();                                   /* (Punto 2: el server sabe que esta dll tiene el Messenger) */
 }
 
@@ -1641,7 +1683,9 @@ static void barra_xy(HWND h, int x, int y, const char *por, int ya800)
         int lobby = vt == 0x00899670 || vt == 0x00899740, costado = pc >= 4 && pc <= 7;   /* (la sala NO: ver abajo) */
         int o0 = lobby ? 547 : 544, m0 = lobby ? 468 : 629, m1 = lobby ? 546 : 703;
         int boton = 0;                                   /* 1 = Options · 2 = Messenger */
-        if ((lobby || costado) && y >= 8 && y <= 64) boton = x >= o0 && x <= 621 ? 1 : x >= m0 && x <= m1 ? 2 : 0;
+        if ((lobby || costado) && g_e2d_lienzo > 800)    /* ★ (24-nov) panorámico: la columna (los mismos lugares) */
+            boton = e2d_pan_en_boton(g_e2d_lienzo, 5, x, y) ? 1 : e2d_pan_en_boton(g_e2d_lienzo, 4, x, y) ? 2 : 0;
+        else if ((lobby || costado) && y >= 8 && y <= 64) boton = x >= o0 && x <= 621 ? 1 : x >= m0 && x <= m1 ? 2 : 0;
         if (g_diagnostico)
             apuntar("  (diag) clic con un panel abierto (%s): x %d · y %d → %s", lobby ? "lobby" : costado ? "barra del costado" : "otra escena", x, y,
                     boton == 1 ? "botón Options → interruptor de Options" : boton == 2 ? "botón Messenger → interruptor del Messenger"
@@ -1660,6 +1704,12 @@ static void barra_xy(HWND h, int x, int y, const char *por, int ya800)
         if (y >= 8 && y <= 58 && x >= 465 && x <= 703)
             apuntar("  [mazino] (medir) clic en la barra: x %d · pantalla %d · escena 0x%08lX vtable 0x%08lX", x, pc,
                     (unsigned long)(ULONG_PTR)esc, (unsigned long)(ULONG_PTR)(esc ? leer_ptr(esc) : NULL));
+        return;
+    }
+    if (g_e2d_lienzo > 800) {                        /* ★ (24-nov) panorámico: Clan 3 · Messenger 4 · Options 5 en la columna */
+        if (e2d_pan_en_boton(g_e2d_lienzo, 3, x, y)) chat("/clan");
+        else if (e2d_pan_en_boton(g_e2d_lienzo, 5, x, y)) { g_opc_por = "columna del costado"; opciones_o_chat(); }
+        else if (e2d_pan_en_boton(g_e2d_lienzo, 4, x, y)) msn_pedido("columna del costado");
         return;
     }
     if (y < 8 || y > 64) return;                     /* (la placa llega a y 61: medido en la captura de 23:42) */
@@ -2190,6 +2240,15 @@ static int __cdecl msn_chat_llega(void *escena, void *msg)
     memcpy(g_msn_llegado, b + 41, n);
     g_msn_llegado[n / 2] = 0;
     int msn = !lstrcmpW(nombre, L"[MSN]");
+    /* ★ (24-nov, EXPERIMENTAL, [pvp] batalla=1) «[PVP]» = avisos del server para la dll, no para el jugador:
+     *   «sala=duelo» / «sala=normal» llegan ANTES del 0x101E / 0x1020 de esa sala (servidor/duelo.py · marcador) y
+     *   deciden qué waitroom_mission.xml sirve la capa pvp\ (eda_traduccion.c). El juego no los muestra. */
+    if (g_pvp_batalla && !lstrcmpW(nombre, L"[PVP]")) {
+        if (!lstrcmpW(g_msn_llegado, L"sala=duelo")) InterlockedExchange(&g_tr_pvp_sala, 1);
+        else if (!lstrcmpW(g_msn_llegado, L"sala=normal")) InterlockedExchange(&g_tr_pvp_sala, 0);
+        apuntar("  [pvp] del server: «%ls» → sala %s", g_msn_llegado, g_tr_pvp_sala ? "de duelo" : "normal");
+        return 1;
+    }
     if (g_diagnostico) {
         char nom8[64], tex8[200];
         WCHAR corto[90];
@@ -2569,6 +2628,7 @@ static long WINAPI mi_present(void *dev, const RECT *a, const RECT *b, HWND w, c
     gr_brillo_dibujar(dev);                                  /* ★ (Punto 6) el brillo, sólo dentro del juego */
     if (g_mostrar) { InterlockedExchange(&g_e2d_propio, 1); dibujar_contador(dev); InterlockedExchange(&g_e2d_propio, 0); }
     e2d_cuadro(dev);                                         /* ★ (Punto 5) escena, backbuffer real, registro */
+    gr_ambiente(dev);                                        /* ★ (24-nov) las franjas con ambiente, no negras */
     /* ★ (19-nov, Punto 5) LOS GANCHOS DE ESCALA, CADA CUADRO. Medido 13:12:32.7 (dueño, al empezar el Stage): otro
      *   programa pisó SetTransform y compañía y la vigía (cada 1 s) los recuperó recién ~1 s después: en ese rato la
      *   barra de habilidades se dibujó con la proyección de 800×600 sin escalar. Ahora se mira en el Present (una
@@ -2634,6 +2694,7 @@ static long WINAPI mi_reset_cuerpo(void *dev, void *pp)
     }
     rojo_soltar_dev(dev);                                    /* (diag rojo: lo suyo del pool DEFAULT) */
     gr_soltar_dev(dev);                                      /* (el state block del brillo) */
+    gr_ambiente_soltar();                                    /* (las superficies de las franjas: pool DEFAULT) */
     sombras_olvidar();
     ajustar_pp(pp);
     gr_ajustar_pp(pp);                                       /* ★ (Punto 6 / 24-nov) el antialias (0 si > 1920×1080) */
@@ -2866,6 +2927,10 @@ static void leer_ajustes(HMODULE self)
     g_mz_atajos = g_mazino ? GetPrivateProfileIntA("mazino", "atajos", 1, ini) : 0;
     g_mz_messenger = g_mazino ? GetPrivateProfileIntA("mazino", "messenger", 1, ini) : 0;
     g_mz_entrada = g_mazino ? GetPrivateProfileIntA("mazino", "entrada", 1, ini) : 0;
+    /* ★ (24-nov) EXPERIMENTAL y APAGADO por defecto: la pestaña Battle del lobby (necesita [mazino] botones=1) */
+    g_pvp_batalla = GetPrivateProfileIntA("pvp", "batalla", 0, ini);
+    if (g_pvp_batalla) apuntar("  [pvp] batalla=1 (experimental): la pestaña Battle del lobby manda «/batalla»%s",
+                               g_mz_botones ? "" : " · ⚠ sin efecto: hace falta [mazino] botones=1");
     /* ★ P2P: que los juegos se encuentren (MEDICIONES §52). Prendido por defecto: sólo arregla lo que
      *   el juego manda roto, y un .ini viejo (el launcher no lo pisa) sin este bloque lo tiene igual */
     g_p2p = GetPrivateProfileIntA("p2p", "activo", 1, ini);

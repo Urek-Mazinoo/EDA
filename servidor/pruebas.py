@@ -1060,6 +1060,13 @@ def control():
     pruebas_multijugador(chequear)
     PARTIDAS.clear()
     ASIGNADAS.clear()
+    pruebas_duelo(chequear)
+    PARTIDAS.clear()
+    ASIGNADAS.clear()
+    SALAS.clear()
+    pruebas_jugadores_sala(chequear)
+    PARTIDAS.clear()
+    SALAS.clear()
     pruebas_panel(chequear)
     PARTIDAS.clear()
     ASIGNADAS.clear()
@@ -1280,6 +1287,228 @@ def pruebas_150_variantes(chequear):
              26004 not in [it[0] for it in nuevos] and 26004 not in [it[0] for it in c["items"]])
     chequear("(Paso 6) el premio da sólo ORO (= Σ Type 0) y no toca el cash", not oro_mal, oro_mal[:10])
     chequear("la carta de cada stage es un ítem que existe (o nada)", not carta_mal, carta_mal[:10])
+
+
+def pruebas_jugadores_sala(chequear):
+    """★ (24-nov) el máximo de jugadores de la sala (servidor/salas.py · maximo_sala, documentacion/MAS_JUGADORES.md)."""
+    from servidor.salas import maximo_sala
+    antes = config.JUGADORES_SALA
+    try:
+        config.JUGADORES_SALA = 0
+        chequear("sala: sin EDA_JUGADORES_SALA, el máximo que manda el cliente (Fácil 3, Normal 5, Difícil 8)",
+                 (maximo_sala(1011, 3), maximo_sala(1012, 5), maximo_sala(1013, 8)) == (3, 5, 8))
+        chequear("sala: si el cliente manda 0, el de la dificultad del escenario (1011 → 3, 1022 → 5, 1503 → 8)",
+                 (maximo_sala(1011, 0), maximo_sala(1022, 0), maximo_sala(1503, 0)) == (3, 5, 8))
+        chequear("sala: ★ el revés: nunca menos que los que ya están (4 adentro, pasa a Fácil → 4) ni más de 8",
+                 maximo_sala(1011, 0, 4) == 4 and maximo_sala(1013, 12) == 8)
+        cuerpo = bytearray(0x59)
+        struct.pack_into("<I", cuerpo, 0x28, 1011)
+        cuerpo[0x2F] = 3
+        r = responder(0x101D, b"\0\0\0\0" + bytes(cuerpo), 521)
+        num = partida(521)["sala"]
+        chequear("sala: creada en Fácil queda en 3 (el 0x101E lo dice en +0x2F)",
+                 SALAS[num]["sala"][0x2F] == 3 and [x for x in r if x[0] == 0x101E][0][1][5 + 0x2F] == 3)
+        responder(0x104B, struct.pack("<HI", 1, 1013) + bytes(28), 521)
+        chequear("sala: ★ pasar el escenario a Difícil (0x104B tipo 1) sube el máximo a 8 (antes quedaba en 3)",
+                 SALAS[num]["sala"][0x2F] == 8)
+        responder(0x104B, struct.pack("<HI", 1, 1012) + bytes(28), 521)
+        chequear("sala: y de vuelta a Normal, 5", SALAS[num]["sala"][0x2F] == 5)
+        SALAS.pop(num)
+        partida(521).pop("sala", None)
+        config.JUGADORES_SALA = 4
+        r = responder(0x101D, b"\0\0\0\0" + bytes(cuerpo), 521)
+        num = partida(521)["sala"]
+        chequear("sala: con EDA_JUGADORES_SALA=4 una sala de Fácil admite 4", SALAS[num]["sala"][0x2F] == 4)
+        SALAS.pop(num)
+        partida(521).pop("sala", None)
+    finally:
+        config.JUGADORES_SALA = antes
+
+
+def pruebas_duelo(chequear):
+    """★ (24-nov, EXPERIMENTAL) el server árbitro del duelo (servidor/duelo.py), con dos conexiones falsas.
+    Lo primero: SIN EDA_PVP nada cambia (el PvE de siempre)."""
+    import tempfile
+    from servidor import duelo
+
+    A, B = 511, 512
+
+    def evento(texto):
+        t = texto.encode()
+        return struct.pack("<II", 0, len(t)) + t + b"\0" * 4
+
+    def en_stage(num):
+        SALAS[num] = {"sala": bytes(0x59), "anfitrion": A, "miembros": [A, B], "numeros": {A: 0, B: 1},
+                      "listos": set()}
+        for m in (A, B):
+            partida(m)["sala"] = num
+            partida(m).pop("resultado_guardado", None)
+            partida(m)["game_over_en"] = None
+        responder(0x1047, bytes([1, 1]), B)
+        responder(0x104E, b"", A)
+        responder(0x105F, b"\0" * 4, A)
+        responder(0x105F, b"\0" * 4, B)
+        return SALAS[num]
+
+    def limpiar(num):
+        SALAS.pop(num, None)
+        for m in (A, B):
+            partida(m).pop("sala", None)
+
+    pvp_antes, duelos_antes = config.PVP, config.DUELOS
+    config.DUELOS = os.path.join(tempfile.mkdtemp(), "duelos.jsonl")
+    try:
+        def chat(texto):
+            b = texto.encode("utf-16-le")
+            return struct.pack("<BIII", 1, 0xFFFFFFFF, 0, len(b)) + b
+
+        def textos(r):                      # 0x1005: HBII (11 B) · nombre (26 B) · u32 largo · el texto UTF-16
+            return [x[1][41:].decode("utf-16-le", "replace") for x in r if x[0] == 0x1005]
+
+        # 0 · el revés de todo: sin EDA_PVP la arena no cambia nada
+        config.PVP = False
+        r = responder(0x100D, chat("/batalla"), A)
+        chequear("batalla: ★ SIN EDA_PVP la pestaña recibe «Servicio no disponible» (el texto 41 del juego)",
+                 len(r) == 1 and r[0][3] == A and any("no disponible" in t for t in textos(r)), textos(r))
+        responder(0x100D, chat("/pvp hola"), A)
+        sc = bytearray(0x59)
+        struct.pack_into("<I", sc, 0x28, 1011)
+        r = responder(0x101D, b"\0\0\0\0" + bytes(sc), A)
+        chequear("batalla: ★ SIN EDA_PVP crear sala no manda ningún «[PVP]» ni marca la sala",
+                 not any(x[0] == 0x1005 for x in r) and not SALAS[partida(A)["sala"]].get("sala_pvp"), r)
+        SALAS.pop(partida(A).pop("sala"), None)
+        s = en_stage(70)
+        responder(0x105C, evento("PvP_Teleport"), A)
+        r = responder(0x1065, b"\x01" + struct.pack("<I", 0), B)
+        chequear("duelo: ★ SIN EDA_PVP un «PvP_*» no marca nada y el muerto recibe su cuadro de revivir (0x1068)",
+                 "duelo" not in s and any(x[0] == 0x1068 for x in r), r)
+        limpiar(70)
+
+        config.PVP = True
+        r = responder(0x100D, chat("/batalla"), A)
+        chequear("batalla: con EDA_PVP, /batalla contesta SÓLO al que la pidió (0 duelos en curso)",
+                 r and all(x[3] == A for x in r) and any("0 duelo" in t for t in textos(r)), textos(r))
+        s = en_stage(71)
+        r = responder(0x105C, evento("OnTrigger_01"), A)
+        chequear("duelo: ★ el revés: un evento del guion que no es «PvP_*» no lo vuelve duelo", not duelo.en_duelo(s))
+        r = responder(0x105C, evento("PvP_Teleport"), A)
+        avisos = [x for x in r if x[0] == 0x1005]
+        chequear("duelo: el 1er «PvP_*» de la partida la marca como duelo y avisa a los dos por el chat",
+                 duelo.en_duelo(s) and sorted(x[3] for x in avisos) == [A, B], r)
+        chequear("duelo: equipos por número de sala % 2 (A número 0 = rojo, B número 1 = azul: la fila que se pinta)",
+                 s["duelo"]["equipos"] == {A: "rojo", B: "azul"}, s["duelo"].get("equipos"))
+        chequear("duelo: el evento se sigue reenviando al otro (0x105D) como siempre",
+                 any(x[0] == 0x105D and x[3] == B for x in r))
+        oro_a, exp_a = leer(A)["plata"], leer(A)["exp"]
+        r = responder(0x1065, b"\x01" + struct.pack("<I", 0), B)       # murió B (1), lo mató la entidad 0 = A
+        chequear("duelo: la muerte NO abre el cuadro de revivir (sin 0x1068) y avisa el ganador",
+                 not any(x[0] == 0x1068 for x in r) and any(x[0] == 0x1005 for x in r), r)
+        chequear("duelo: gana A (entidad 0 = su número de sala) por muerte",
+                 s["duelo"]["ganador"] == A and s["duelo"]["por"] == "muerte")
+        reg = [json.loads(l) for l in open(config.DUELOS, encoding="utf-8")]
+        chequear("duelo: queda anotado en duelos.jsonl", len(reg) == 1 and reg[0]["por"] == "muerte", reg)
+        chequear("duelo: el muerto tiene su red (game over si el guion no cierra la stage)",
+                 bool(partida(B).get("game_over_en")))
+        r = responder(0x1065, b"\x00" + struct.pack("<I", 1), A)
+        chequear("duelo: ★ el revés: una 2.ª muerte no cambia el ganador ni se anota otra vez",
+                 s["duelo"]["ganador"] == A and len(open(config.DUELOS, encoding="utf-8").readlines()) == 1)
+        r = responder(0x1064, b"\x00", A)
+        fin = [x for x in r if x[0] == 0x1073]
+        award = [x for x in r if x[0] == 0x1072]
+        chequear("duelo: el fin del máster cierra la stage de los dos (0x1073 a cada uno)", len(fin) == 2, r)
+        chequear("duelo: sin premio: el PlayEnd sin ítems y la EXP y el oro de A como antes",
+                 all(x[1][25] == 0 for x in fin) and leer(A)["exp"] == exp_a and leer(A)["plata"] == oro_a,
+                 [x[1][:28].hex() for x in fin])
+        chequear("duelo: AWARD vacío enseguida (vuelve a la sala sin cobrar cartas)",
+                 len(award) == 2 and all(x[1] == struct.pack("<IB", 0, 0) for x in award), award)
+        limpiar(71)
+
+        # ★ la SALA DE DUELO (pestaña «Batalla PvP» → crear) y el aviso «[PVP]» a la dll, antes del 0x101E / 0x1020
+        def nombres_1005(r):
+            return [x[1][11:37].decode("utf-16-le", "replace").rstrip("\0") for x in r if x[0] == 0x1005]
+
+        for m in (A, B):
+            partida(m).pop("sala", None)
+        sala_cuerpo = bytearray(0x59)
+        struct.pack_into("<I", sala_cuerpo, 0x28, 1011)
+        responder(0x100D, chat("/pvp hola"), A)
+        responder(0x100D, chat("/pvp hola"), B)
+        responder(0x100D, chat("/batalla"), A)
+        r = responder(0x101D, b"\0\0\0\0" + bytes(sala_cuerpo), A)
+        num = partida(A)["sala"]
+        orden = [x[0] for x in r]
+        chequear("sala de duelo: creada con la pestaña Batalla → marcada, y el aviso «[PVP] sala=duelo» va ANTES del 0x101E",
+                 SALAS[num].get("sala_pvp") and orden.index(0x1005) < orden.index(0x101E)
+                 and "[PVP]" in nombres_1005(r) and any("sala=duelo" in t for t in textos(r)), orden)
+        r = responder(0x101F, b"\0\0\0\0" + struct.pack("<H", num) + bytes(20), B)
+        orden = [x[0] for x in r]
+        chequear("sala de duelo: el que entra también recibe «sala=duelo» antes de su 0x1020",
+                 0x1020 in orden and 0x1005 in orden and orden.index(0x1005) < orden.index(0x1020)
+                 and any("sala=duelo" in t for t in textos([x for x in r if len(x) < 4 or x[3] == B])), orden)
+        SALAS.pop(num, None)
+        for m in (A, B):
+            partida(m).pop("sala", None)
+        responder(0x100D, chat("/escenario"), A)
+        r = responder(0x101D, b"\0\0\0\0" + bytes(sala_cuerpo), A)
+        num = partida(A)["sala"]
+        chequear("sala de duelo: ★ el revés: con la pestaña Escenario la sala es normal («sala=normal»)",
+                 not SALAS[num].get("sala_pvp") and any("sala=normal" in t for t in textos(r)), textos(r))
+        SALAS.pop(num, None)
+        partida(A).pop("sala", None)
+        duelo.olvidar(A)
+        responder(0x100D, chat("/batalla"), A)
+        r = responder(0x101D, b"\0\0\0\0" + bytes(sala_cuerpo), A)
+        num = partida(A)["sala"]
+        chequear("sala de duelo: ★ el revés: a una dll que no se presentó («/pvp hola») no le llega ningún «[PVP]»",
+                 SALAS[num].get("sala_pvp") and "[PVP]" not in nombres_1005(r), nombres_1005(r))
+        SALAS.pop(num, None)
+        partida(A).pop("sala", None)
+        duelo.olvidar(A)
+        duelo.olvidar(B)
+
+        # el que mató no es el otro jugador (p. ej. una trampa o un NPC): gana igual el otro del duelo
+        s = en_stage(72)
+        responder(0x105C, evento("PvP_Cuenta"), A)
+        responder(0x1065, b"\x00" + struct.pack("<I", 300), A)
+        chequear("duelo: si lo mató una entidad que no es jugador, gana el otro", s["duelo"]["ganador"] == B)
+        limpiar(72)
+
+        # ★ (25-nov) fin por tiempo: la stage termina sin muerte → empate anotado una vez, sin ganador
+        s = en_stage(74)
+        responder(0x105C, evento("PvP_Pelea"), A)
+        n_antes = len(open(config.DUELOS, encoding="utf-8").readlines())
+        r = responder(0x1064, b"\x00", A)
+        lineas = open(config.DUELOS, encoding="utf-8").readlines()
+        reg = json.loads(lineas[-1])
+        chequear("duelo: fin sin muerte (por tiempo) → empate anotado, sin ganador, con los dos nombres",
+                 len(lineas) == n_antes + 1 and reg["ganador"] is None and reg["por"] == "tiempo"
+                 and len(reg["jugadores"]) == 2 and s["duelo"]["ganador"] is None, reg)
+        chequear("duelo: el empate también cierra la stage de los dos sin premio",
+                 len([x for x in r if x[0] == 0x1073]) == 2, [x[0] for x in r])
+        responder(0x1064, b"\x00", B)
+        chequear("duelo: ★ el revés: el fin del otro no anota un 2.º empate",
+                 len(open(config.DUELOS, encoding="utf-8").readlines()) == n_antes + 1)
+        limpiar(74)
+        s = en_stage(75)
+        responder(0x105C, evento("PvP_Pelea"), A)
+        responder(0x1065, b"\x01" + struct.pack("<I", 0), B)
+        n_antes = len(open(config.DUELOS, encoding="utf-8").readlines())
+        responder(0x1064, b"\x00", A)
+        chequear("duelo: ★ el revés: con un KO antes, el fin de la stage NO anota empate",
+                 len(open(config.DUELOS, encoding="utf-8").readlines()) == n_antes and not s["duelo"].get("empate"))
+        limpiar(75)
+
+        # desconexión durante el duelo: gana el que queda
+        s = en_stage(73)
+        responder(0x105C, evento("PvP_Pelea"), A)
+        ASIGNADAS[B] = "rui"
+        cerrada(B)
+        reg = json.loads(open(config.DUELOS, encoding="utf-8").readlines()[-1])
+        chequear("duelo: si uno se desconecta, gana el que queda (y se anota con su nombre)",
+                 s["duelo"]["ganador"] == A and s["duelo"]["por"] == "desconexion" and reg["perdedor"] == "rui", reg)
+        limpiar(73)
+    finally:
+        config.PVP, config.DUELOS = pvp_antes, duelos_antes
 
 
 def pruebas_multijugador(chequear):
