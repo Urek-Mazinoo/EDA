@@ -466,4 +466,137 @@ static inline int eda_rt_ajustar_arbol(void *head_ptr, int old_w, int old_h, int
     return ajustados;
 }
 
+/* ── 4. Ajuste de cámaras de pantalla de LithTech (OT_CAMERA) tras un Reset en vivo ──
+ * Evidencia verificada en EDA_limpio.exe y en el registro de sesión (24-nov 22:00:17, 1920×1080 → 800×600 en Stage):
+ *   - Al entrar al Stage, 0x0055113B fija la cámara con SetCameraRect(cam, bFullScreen=0, 0, 0, W, H) (0x00410DE0) y
+ *     SetCameraFOV(cam, 70°, 70°·H/W) (0x00413F60) una sola vez. Con bFullScreen=0 LithTech NO la redimensiona en
+ *     RestartRender.
+ *   - En cada cuadro del Stage tras cambiar en vivo de 1920×1080 a 800×600, RenderCamera (0x00417F33) copiaba el
+ *     rectángulo viejo (0, 0, 1920, 1080) y m_yFov de 16:9 (39,375°) a SceneDesc (0x009385B0) → d3d_InitView
+ *     (0x006632A0 → 0x0065B359) reconstruía g_ViewParams (0x009385E0) con m_Rect = 1920×1080 y proyección 16:9.
+ *     Aunque el RT de pantalla (0x006656BA) ya era 800×600, los efectos D3DX (d3dx9_29.dll) recibían rect/proyección
+ *     16:9 / 1920×1080 sobre el RT 4:3 de 800×600 → seguía la distorsión («efecto agua») al atacar.
+ *   - Lista global de OT_CAMERA (tipo 5) en ObjectMgr: g_pClientMgr = *(void **)0x0092E51C (0x00410B96); en
+ *     om_CreateObject (0x004789A0) la lista del tipo t está en g_pClientMgr + 0x264 + t*16 (+4 = centinela LTLink
+ *     m_Head), o sea g_pClientMgr + 0x2B8 para OT_CAMERA (5). Cada nodo enlaza en obj + 0x78 con data = obj.
+ *   - En CameraInstance: +0xA8 tipo (5), +0x190..+0x19C rect (left/top/right/bottom), +0x1A0 m_xFov, +0x1A4 m_yFov,
+ *     +0x1A8 m_bFullScreen. Actualizando las cámaras de pantalla entera tras Reset == 0, RenderCamera y g_ViewParams
+ *     pasan a usar el tamaño y la proporción nuevos en el primer cuadro. */
+#define EDA_CAM_INSERT_ADDR     0x004789A0u
+#define EDA_CAM_SETRECT_ADDR    0x00410DE0u
+#define EDA_CAM_SETFOV_ADDR     0x00413F60u
+#define EDA_CAM_CREOBJ_ADDR     0x00410B96u
+#define EDA_CAM_MGR_ADDR        0x0092E51Cu
+#define EDA_CAM_LIST_OFS        0x02B8u
+#define EDA_CAM_TYPE_OFS        0x00A8u
+#define EDA_CAM_RECT_OFS        0x0190u
+#define EDA_CAM_FOV_OFS         0x01A0u
+#define EDA_CAM_FULL_OFS        0x01A8u
+#define EDA_CAM_OBJ_SIZE        0x01ACu
+#define EDA_CAM_TYPE_VAL        5u
+
+static const unsigned char EDA_CAM_INSERT_SIG[26] = {
+    0x8D, 0x46, 0x78, 0x89, 0x70, 0x08, 0xC1, 0xE7, 0x04, 0x8D, 0x8C, 0x1F, 0x64,
+    0x02, 0x00, 0x00, 0x8D, 0x51, 0x04, 0x89, 0x10, 0x8B, 0x52, 0x04, 0x89, 0x50
+};
+
+static const unsigned char EDA_CAM_SETRECT_SIG[24] = {
+    0x8B, 0x44, 0x24, 0x04, 0x85, 0xC0, 0x74, 0x3C, 0x80, 0xB8, 0xA8, 0x00,
+    0x00, 0x00, 0x05, 0x75, 0x33, 0x0F, 0xB6, 0x4C, 0x24, 0x08, 0x8B, 0x54
+};
+
+static const unsigned char EDA_CAM_SETFOV_SIG[24] = {
+    0x8B, 0x4C, 0x24, 0x04, 0x85, 0xC9, 0x0F, 0x84, 0x90, 0x00, 0x00, 0x00,
+    0x80, 0xB9, 0xA8, 0x00, 0x00, 0x00, 0x05, 0x0F, 0x85, 0x83, 0x00, 0x00
+};
+
+static const unsigned char EDA_CAM_CREOBJ_SIG[12] = {
+    0x8B, 0x0D, 0x1C, 0xE5, 0x92, 0x00, 0x68, 0xFF, 0xFF, 0x00, 0x00, 0x89
+};
+
+static inline int eda_cam_verificar_bytes(const unsigned char *ins_b, const unsigned char *rect_b,
+                                          const unsigned char *fov_b, const unsigned char *mgr_b)
+{
+    if (!ins_b || !rect_b || !fov_b || !mgr_b) return 0;
+    return memcmp(ins_b, EDA_CAM_INSERT_SIG, sizeof(EDA_CAM_INSERT_SIG)) == 0
+        && memcmp(rect_b, EDA_CAM_SETRECT_SIG, sizeof(EDA_CAM_SETRECT_SIG)) == 0
+        && memcmp(fov_b, EDA_CAM_SETFOV_SIG, sizeof(EDA_CAM_SETFOV_SIG)) == 0
+        && memcmp(mgr_b, EDA_CAM_CREOBJ_SIG, sizeof(EDA_CAM_CREOBJ_SIG)) == 0;
+}
+
+typedef struct EDA_LT_LINK {
+    struct EDA_LT_LINK *prev;     /* +0x00 */
+    struct EDA_LT_LINK *next;     /* +0x04 */
+    void *data;                   /* +0x08 */
+} EDA_LT_LINK;
+
+static inline float eda_rec_fabsf(float x) { return x < 0.0f ? -x : x; }
+
+static inline int eda_cam_ratio_viejo(float r, int old_w, int old_h, const int viejos[][2], int n_viejos)
+{
+    if (old_w >= 320 && old_h >= 200) {
+        float ro = (float)old_h / (float)old_w;
+        if (eda_rec_fabsf(r - ro) < 0.02f) return 1;
+    }
+    if (viejos && n_viejos > 0) {
+        for (int i = 0; i < n_viejos; i++) {
+            if (viejos[i][0] >= 320 && viejos[i][1] >= 200) {
+                float rv = (float)viejos[i][1] / (float)viejos[i][0];
+                if (eda_rec_fabsf(r - rv) < 0.02f) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static inline int eda_cam_ajustar_lista(void *head_ptr, int old_w, int old_h, int new_w, int new_h,
+                                        const int viejos[][2], int n_viejos, EDA_LEGIBLE_FN ok_leer)
+{
+    if (!head_ptr || !ok_leer || new_w < 320 || new_h < 200 || new_w > 8192 || new_h > 8192) return 0;
+    EDA_LT_LINK *head = (EDA_LT_LINK *)head_ptr;
+    if (!ok_leer(head, sizeof(*head))) return 0;
+    EDA_LT_LINK *cur = head->next;
+    int ajustadas = 0;
+    float r_nuevo = (float)new_h / (float)new_w;
+    for (int paso = 0; paso < 64 && cur && cur != head; paso++) {
+        if (!ok_leer(cur, sizeof(*cur))) break;
+        unsigned char *cam = (unsigned char *)cur->data;
+        if (cam && ok_leer(cam, EDA_CAM_OBJ_SIZE) && cam[EDA_CAM_TYPE_OFS] == EDA_CAM_TYPE_VAL) {
+            int32_t left = 0, top = 0, right = 0, bottom = 0, full = 0;
+            float fx = 0.0f, fy = 0.0f;
+            memcpy(&left, cam + EDA_CAM_RECT_OFS + 0, 4);
+            memcpy(&top, cam + EDA_CAM_RECT_OFS + 4, 4);
+            memcpy(&right, cam + EDA_CAM_RECT_OFS + 8, 4);
+            memcpy(&bottom, cam + EDA_CAM_RECT_OFS + 12, 4);
+            memcpy(&fx, cam + EDA_CAM_FOV_OFS + 0, 4);
+            memcpy(&fy, cam + EDA_CAM_FOV_OFS + 4, 4);
+            memcpy(&full, cam + EDA_CAM_FULL_OFS, 4);
+            int tocada = 0;
+            if (left == 0 && top == 0
+                && eda_rt_es_de_pantalla((int)right, (int)bottom, old_w, old_h, viejos, n_viejos)
+                && ((int)right != new_w || (int)bottom != new_h)) {
+                int32_t nw = (int32_t)new_w, nh = (int32_t)new_h;
+                memcpy(cam + EDA_CAM_RECT_OFS + 8, &nw, 4);
+                memcpy(cam + EDA_CAM_RECT_OFS + 12, &nh, 4);
+                if (fx > 0.1f && fx < 3.0f) {
+                    float fy_nuevo = fx * r_nuevo;
+                    memcpy(cam + EDA_CAM_FOV_OFS + 4, &fy_nuevo, 4);
+                }
+                tocada = 1;
+            } else if (full != 0 && fx > 0.1f && fx < 3.0f && fy > 0.1f && fy < 3.0f) {
+                float r_cam = fy / fx;
+                if (eda_rec_fabsf(r_cam - r_nuevo) > 0.01f
+                    && eda_cam_ratio_viejo(r_cam, old_w, old_h, viejos, n_viejos)) {
+                    float fy_nuevo = fx * r_nuevo;
+                    memcpy(cam + EDA_CAM_FOV_OFS + 4, &fy_nuevo, 4);
+                    tocada = 1;
+                }
+            }
+            if (tocada) ajustadas++;
+        }
+        cur = cur->next;
+    }
+    return ajustadas;
+}
+
 #endif /* EDA_RECURSOS_H */

@@ -609,12 +609,121 @@ static void probar_rt_motor(const char *exe_ruta)
     chequear("árbol RB corrupto con ciclo termina de forma segura (sin bucle infinito)", adj_ciclo == 0);
 }
 
+static void cam_armar(unsigned char *buf, unsigned char tipo, int l, int t, int r, int b, float fx, float fy, int full)
+{
+    memset(buf, 0, EDA_CAM_OBJ_SIZE);
+    buf[EDA_CAM_TYPE_OFS] = tipo;
+    int32_t v[4] = {(int32_t)l, (int32_t)t, (int32_t)r, (int32_t)b};
+    int32_t fl = (int32_t)full;
+    memcpy(buf + EDA_CAM_RECT_OFS, v, sizeof(v));
+    memcpy(buf + EDA_CAM_FOV_OFS + 0, &fx, 4);
+    memcpy(buf + EDA_CAM_FOV_OFS + 4, &fy, 4);
+    memcpy(buf + EDA_CAM_FULL_OFS, &fl, 4);
+}
+
+static void cam_leer(const unsigned char *buf, int *r, int *b, float *fy)
+{
+    int32_t rv = 0, bv = 0;
+    float fyv = 0.0f;
+    memcpy(&rv, buf + EDA_CAM_RECT_OFS + 8, 4);
+    memcpy(&bv, buf + EDA_CAM_RECT_OFS + 12, 4);
+    memcpy(&fyv, buf + EDA_CAM_FOV_OFS + 4, 4);
+    if (r) *r = (int)rv;
+    if (b) *b = (int)bv;
+    if (fy) *fy = fyv;
+}
+
+static void probar_cam_motor(const char *exe_ruta)
+{
+    printf("== Parte E: cámaras de pantalla de LithTech (OT_CAMERA: 0x4789A0 / 0x410DE0 / 0x413F60 / 0x410B96) ==\n");
+    unsigned char s_ins[sizeof(EDA_CAM_INSERT_SIG)];
+    unsigned char s_rec[sizeof(EDA_CAM_SETRECT_SIG)];
+    unsigned char s_fov[sizeof(EDA_CAM_SETFOV_SIG)];
+    unsigned char s_mgr[sizeof(EDA_CAM_CREOBJ_SIG)];
+    memcpy(s_ins, EDA_CAM_INSERT_SIG, sizeof(s_ins));
+    memcpy(s_rec, EDA_CAM_SETRECT_SIG, sizeof(s_rec));
+    memcpy(s_fov, EDA_CAM_SETFOV_SIG, sizeof(s_fov));
+    memcpy(s_mgr, EDA_CAM_CREOBJ_SIG, sizeof(s_mgr));
+    chequear("firmas OT_CAMERA (4 funciones) coinciden → válidas",
+             eda_cam_verificar_bytes(s_ins, s_rec, s_fov, s_mgr) == 1);
+    s_fov[14] ^= 0xFF;
+    chequear("1 byte distinto en SetCameraFOV → firma rechazada",
+             eda_cam_verificar_bytes(s_ins, s_rec, s_fov, s_mgr) == 0);
+    s_fov[14] ^= 0xFF;
+
+    if (exe_ruta && exe_ruta[0]) {
+        unsigned char r_ins[sizeof(EDA_CAM_INSERT_SIG)] = {0};
+        unsigned char r_rec[sizeof(EDA_CAM_SETRECT_SIG)] = {0};
+        unsigned char r_fov[sizeof(EDA_CAM_SETFOV_SIG)] = {0};
+        unsigned char r_mgr[sizeof(EDA_CAM_CREOBJ_SIG)] = {0};
+        int ok_exe = leer_pe_va(exe_ruta, EDA_CAM_INSERT_ADDR, r_ins, sizeof(r_ins))
+                  && leer_pe_va(exe_ruta, EDA_CAM_SETRECT_ADDR, r_rec, sizeof(r_rec))
+                  && leer_pe_va(exe_ruta, EDA_CAM_SETFOV_ADDR, r_fov, sizeof(r_fov))
+                  && leer_pe_va(exe_ruta, EDA_CAM_CREOBJ_ADDR, r_mgr, sizeof(r_mgr))
+                  && eda_cam_verificar_bytes(r_ins, r_rec, r_fov, r_mgr);
+        chequear("EDA_limpio.exe real: firmas 0x4789A0 / 0x410DE0 / 0x413F60 / 0x410B96 verificadas byte a byte", ok_exe);
+    }
+
+    const float fx70 = 70.0f * 3.14159265f / 180.0f;
+    const float fy169 = fx70 * (9.0f / 16.0f);
+    const float fy43 = fx70 * (3.0f / 4.0f);
+
+    unsigned char cam_stage[EDA_CAM_OBJ_SIZE];
+    unsigned char cam_vieja[EDA_CAM_OBJ_SIZE];
+    unsigned char cam_sub[EDA_CAM_OBJ_SIZE];
+    unsigned char obj_otro[EDA_CAM_OBJ_SIZE];
+    cam_armar(cam_stage, 5, 0, 0, 1920, 1080, fx70, fy169, 0);
+    cam_armar(cam_vieja, 5, 0, 0, 1280, 720,  fx70, fy169, 0);
+    cam_armar(cam_sub,   5, 10, 20, 300, 200, fx70, fy43,  0);
+    cam_armar(obj_otro,  1, 0, 0, 1920, 1080, fx70, fy169, 0);
+
+    EDA_LT_LINK head, l1, l2, l3, l4;
+    head.prev = &l4; head.next = &l1; head.data = NULL;
+    l1.prev = &head; l1.next = &l2;   l1.data = cam_stage;
+    l2.prev = &l1;   l2.next = &l3;   l2.data = cam_vieja;
+    l3.prev = &l2;   l3.next = &l4;   l3.data = cam_sub;
+    l4.prev = &l3;   l4.next = &head; l4.data = obj_otro;
+
+    const int viejos[2][2] = {{1280, 720}, {1600, 900}};
+    int n1 = eda_cam_ajustar_lista(&head, 1920, 1080, 800, 600, viejos, 2, rt_legible_siempre);
+    int r1, b1, r2, b2, r3, b3, r4, b4;
+    float fy1, fy2, fy3, fy4;
+    cam_leer(cam_stage, &r1, &b1, &fy1);
+    cam_leer(cam_vieja, &r2, &b2, &fy2);
+    cam_leer(cam_sub,   &r3, &b3, &fy3);
+    cam_leer(obj_otro,  &r4, &b4, &fy4);
+    chequear("Reset 1920×1080 → 800×600 en Stage: ajusta rect a 800×600 y FovY de 16:9 → 4:3",
+             n1 == 2 && r1 == 800 && b1 == 600 && fabsf(fy1 - fy43) < 1e-4f
+             && r2 == 800 && b2 == 600 && fabsf(fy2 - fy43) < 1e-4f);
+    chequear("sub-cámara (10,20)-(300,200) y objeto no-cámara (tipo 1) NO se tocan",
+             r3 == 300 && b3 == 200 && fabsf(fy3 - fy43) < 1e-4f && r4 == 1920 && b4 == 1080);
+
+    int n2 = eda_cam_ajustar_lista(&head, 800, 600, 1024, 768, viejos, 2, rt_legible_siempre);
+    cam_leer(cam_stage, &r1, &b1, &fy1);
+    chequear("2º Reset 800×600 → 1024×768: cámara sigue a 1024×768 (4:3)",
+             n2 == 2 && r1 == 1024 && b1 == 768 && fabsf(fy1 - fy43) < 1e-4f);
+
+    int n3 = eda_cam_ajustar_lista(&head, 1024, 768, 1920, 1080, viejos, 2, rt_legible_siempre);
+    cam_leer(cam_stage, &r1, &b1, &fy1);
+    chequear("3º Reset 1024×768 → 1920×1080: cámara vuelve a 1920×1080 y FovY 16:9",
+             n3 == 2 && r1 == 1920 && b1 == 1080 && fabsf(fy1 - fy169) < 1e-4f);
+
+    /* Lista corrupta con ciclo: termina acotada sin bucle infinito */
+    EDA_LT_LINK c_head, c_a, c_b;
+    c_head.prev = &c_b; c_head.next = &c_a; c_head.data = NULL;
+    c_a.prev = &c_head; c_a.next = &c_b;    c_a.data = NULL;
+    c_b.prev = &c_a;    c_b.next = &c_a;    c_b.data = NULL;
+    int n_ciclo = eda_cam_ajustar_lista(&c_head, 1920, 1080, 800, 600, NULL, 0, rt_legible_siempre);
+    chequear("lista LTLink corrupta con ciclo termina de forma segura (sin bucle infinito)", n_ciclo == 0);
+}
+
 int main(int argc, char **argv)
 {
     probar_parte_a();
     probar_parte_b(argc > 1 ? argv[1] : NULL);
     probar_parte_c();
     probar_rt_motor(argc > 1 ? argv[1] : NULL);
+    probar_cam_motor(argc > 1 ? argv[1] : NULL);
     printf("prueba_pantalla: %d bien · %d mal\n", ok, mal);
     return mal ? 1 : 0;
 }

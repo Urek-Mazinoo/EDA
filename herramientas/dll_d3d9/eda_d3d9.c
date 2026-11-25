@@ -686,6 +686,21 @@ static void rec_verificar_rt_motor(void)
             g_rt_fix_ok ? "firmas verificadas · ajuste ACTIVO"
                         : "⚠ firmas distintas (¿otro exe?): desactivado");
 }
+static int g_cam_fix_ok;
+static void rec_verificar_cam_motor(void)
+{
+    g_cam_fix_ok = legible((const void *)(ULONG_PTR)EDA_CAM_INSERT_ADDR, sizeof(EDA_CAM_INSERT_SIG))
+        && legible((const void *)(ULONG_PTR)EDA_CAM_SETRECT_ADDR, sizeof(EDA_CAM_SETRECT_SIG))
+        && legible((const void *)(ULONG_PTR)EDA_CAM_SETFOV_ADDR, sizeof(EDA_CAM_SETFOV_SIG))
+        && legible((const void *)(ULONG_PTR)EDA_CAM_CREOBJ_ADDR, sizeof(EDA_CAM_CREOBJ_SIG))
+        && eda_cam_verificar_bytes((const unsigned char *)(ULONG_PTR)EDA_CAM_INSERT_ADDR,
+                                   (const unsigned char *)(ULONG_PTR)EDA_CAM_SETRECT_ADDR,
+                                   (const unsigned char *)(ULONG_PTR)EDA_CAM_SETFOV_ADDR,
+                                   (const unsigned char *)(ULONG_PTR)EDA_CAM_CREOBJ_ADDR);
+    apuntar("  (pantalla) cámaras del motor (0x4789A0/0x410DE0/0x413F60/0x410B96): %s",
+            g_cam_fix_ok ? "firmas verificadas · ajuste ACTIVO"
+                         : "⚠ firmas distintas (¿otro exe?): desactivado");
+}
 static int rec_tras_stage_seguro(char *motivo, int cap)
 {
     int desc = 0;
@@ -2598,6 +2613,16 @@ static int rec_ajustar_rt_motor(int old_w, int old_h, int new_w, int new_h)
     return eda_rt_ajustar_arbol(head, old_w, old_h, new_w, new_h, g_e2d_viejos, g_e2d_viejos_n, rec_legible_cb);
 }
 
+static int rec_ajustar_cam_motor(int old_w, int old_h, int new_w, int new_h)
+{
+    if (!g_cam_fix_ok || new_w < 320 || new_h < 200) return 0;
+    if (!legible((const void *)(ULONG_PTR)EDA_CAM_MGR_ADDR, sizeof(void *))) return 0;
+    unsigned char *mgr = *(unsigned char *const *)(ULONG_PTR)EDA_CAM_MGR_ADDR;
+    if (!mgr || !legible(mgr + EDA_CAM_LIST_OFS, sizeof(EDA_LT_LINK))) return 0;
+    return eda_cam_ajustar_lista(mgr + EDA_CAM_LIST_OFS, old_w, old_h, new_w, new_h,
+                                 g_e2d_viejos, g_e2d_viejos_n, rec_legible_cb);
+}
+
 static long WINAPI mi_reset_cuerpo(void *dev, void *pp)
 {
     int old_w = g_e2d_w, old_h = g_e2d_h;
@@ -2638,6 +2663,9 @@ static long WINAPI mi_reset_cuerpo(void *dev, void *pp)
         int rt_adj = rec_ajustar_rt_motor(old_w, old_h, new_w, new_h);
         if (rt_adj > 0)
             apuntar("  ★ Reset: %d render target(s) de pantalla del motor ajustados → %d×%d", rt_adj, new_w, new_h);
+        int cam_adj = rec_ajustar_cam_motor(old_w, old_h, new_w, new_h);
+        if (cam_adj > 0)
+            apuntar("  ★ Reset: %d cámara(s) del motor ajustadas → %d×%d (rect + FovY)", cam_adj, new_w, new_h);
         if (g_e2d_stages > 0)
             apuntar("  ★ Reset tras %d Stage(s) → OK · fugas IB corregidas: %ld (drenadas: %d) · POOL_DEFAULT restantes: %d",
                     g_e2d_stages, g_fuga_ib.arregladas, drenados, g_rec.vivos);
@@ -3071,6 +3099,7 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD razon, LPVOID reservado)
     if (g_mejoras) {
         rec_verificar_fuga_ib();
         rec_verificar_rt_motor();
+        rec_verificar_cam_motor();
     }
     QueryPerformanceFrequency(&g_frec);
     timeBeginPeriod(1);                                          /* Sleep(1) ≈ 1 ms */

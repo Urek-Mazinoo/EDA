@@ -313,8 +313,10 @@ static long WINAPI e2d_settransform(void *dev, DWORD tipo, const float *m)
             } else {
                 if (!g_e2d_rt_fuera) {
                     float fx = 2.0f * atanf(1.0f / m[0]), fy = 2.0f * atanf(1.0f / m[5]);
-                    if (e2d_aspecto_viejo(fx, fy))
+                    if (e2d_aspecto_viejo(fx, fy)) {
                         p[5] = 1.0f / tanf(fx * ((float)g_e2d_h / (float)g_e2d_w) / 2.0f);
+                        memcpy(g_e2d_proj, p, sizeof(g_e2d_proj));
+                    }
                 }
                 InterlockedIncrement(&c_e2d_persp_stage);
             }
@@ -358,8 +360,10 @@ static long WINAPI e2d_settransform(void *dev, DWORD tipo, const float *m)
         } else {
             if (g_e2d_viejos_n > 0 && !g_e2d_rt_fuera) {
                 float fx = 2.0f * atanf(1.0f / m[0]), fy = 2.0f * atanf(1.0f / m[5]);
-                if (e2d_aspecto_viejo(fx, fy))
+                if (e2d_aspecto_viejo(fx, fy)) {
                     p[5] = 1.0f / tanf(fx * ((float)g_e2d_h / (float)g_e2d_w) / 2.0f);
+                    memcpy(g_e2d_proj, p, sizeof(g_e2d_proj));
+                }
             }
             InterlockedIncrement(&c_e2d_persp_stage);
         }
