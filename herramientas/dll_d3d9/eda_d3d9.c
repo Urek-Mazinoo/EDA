@@ -44,6 +44,21 @@ typedef void *(WINAPI *CREAR9)(UINT);
 static HMODULE g_real;
 static CREAR9 g_crear;
 
+/* ── ★ (24-nov) guardia general de reentrada + corrección de fuga IB / red POOL_DEFAULT ── */
+#define EDA_HILO_ACTUAL() ((unsigned long)GetCurrentThreadId())
+#define EDA_G_CAS(ptr, nuevo, viejo) ((unsigned long)InterlockedCompareExchange((volatile LONG *)(ptr), (LONG)(nuevo), (LONG)(viejo)))
+#include "eda_ganchos.h"
+#include "eda_recursos.h"
+
+static EDA_FUGA_IB g_fuga_ib;
+static EDA_REC_TABLA g_rec;
+static volatile LONG g_rec_propio;
+static int g_arreglar_fuga_ib = 1;
+static void rec_registrar(void *obj, int tipo, unsigned long ret_addr, unsigned long bytes);
+#define EDA_REC_PROPIO_INC() InterlockedIncrement(&g_rec_propio)
+#define EDA_REC_PROPIO_DEC() InterlockedDecrement(&g_rec_propio)
+#define EDA_REC_ALTA_TEX(obj, ret_addr, bytes) rec_registrar((obj), EDA_RT_TEX, (ret_addr), (bytes))
+
 /* ── ajustes ───────────────────────────────────────────────────────────── */
 static int g_tope = 120;
 static int g_mostrar = 1;
@@ -226,12 +241,15 @@ static long g_subidos, g_subidos_bytes;
 
 static long WINAPI mi_sss(void *dev, UINT n, void *vb, UINT desde, UINT paso)
 {
+    EDA_G_ENTRAR_HR(EDA_G_SSS, M_SSS, dev, n, vb, desde, paso);
     if (n == 0) {
         g_st_vb = vb;
         g_st_desde = desde;
         g_st_paso = paso;
     }
-    return g_sss_real(dev, n, vb, desde, paso);
+    long hr = g_sss_real(dev, n, vb, desde, paso);
+    EDA_G_SALIR(EDA_G_SSS);
+    return hr;
 }
 
 /* sube [lo, lo+largo) de la copia al próximo lugar del anillo; devuelve cuántos VÉRTICES hay que correr
@@ -379,34 +397,48 @@ static void contar_dibujo(void *dev)
 static void rojo_dibujo(DWORD dir, int clase);   /* (eda_rojo.c: diagnóstico del destello rojo, sólo mira) */
 static long WINAPI mi_dp(void *dev, DWORD tipo, UINT inicio, UINT prims)
 {
+    EDA_G_ENTRAR_HR(EDA_G_DP, M_DP, dev, tipo, inicio, prims);
     contar_dibujo(dev);
     rojo_dibujo((DWORD)(ULONG_PTR)__builtin_return_address(0), 0);
     SOMBRA *s = sombra_puesta(dev);
+    long hr;
     if (s) {
         UINT n = vertices_de(tipo, prims);
         int corre = subir(s, g_st_desde + inicio * g_st_paso, n * g_st_paso, g_st_paso);
-        if (corre != NO_SE_PUDO && (INT)inicio + corre >= 0)
-            return g_dp_real(dev, tipo, (UINT)((INT)inicio + corre), prims);
+        if (corre != NO_SE_PUDO && (INT)inicio + corre >= 0) {
+            hr = g_dp_real(dev, tipo, (UINT)((INT)inicio + corre), prims);
+            EDA_G_SALIR(EDA_G_DP);
+            return hr;
+        }
         subir_todo(s);
     }
-    return g_dp_real(dev, tipo, inicio, prims);
+    hr = g_dp_real(dev, tipo, inicio, prims);
+    EDA_G_SALIR(EDA_G_DP);
+    return hr;
 }
 
 static long WINAPI mi_dip(void *dev, DWORD tipo, INT base, UINT minimo, UINT n, UINT desde_idx, UINT prims)
 {
+    EDA_G_ENTRAR_HR(EDA_G_DIP, M_DIP, dev, tipo, base, minimo, n, desde_idx, prims);
     contar_dibujo(dev);
     rojo_dibujo((DWORD)(ULONG_PTR)__builtin_return_address(0), 1);
     SOMBRA *s = sombra_puesta(dev);
+    long hr;
     if (s) {
         INT primero = base + (INT)minimo;
         if (primero >= 0 && n > 0) {                     /* (n = 0: el juego no dijo cuántos → todo) */
             int corre = subir(s, g_st_desde + (UINT)primero * g_st_paso, n * g_st_paso, g_st_paso);
-            if (corre != NO_SE_PUDO)
-                return g_dip_real(dev, tipo, base + corre, minimo, n, desde_idx, prims);
+            if (corre != NO_SE_PUDO) {
+                hr = g_dip_real(dev, tipo, base + corre, minimo, n, desde_idx, prims);
+                EDA_G_SALIR(EDA_G_DIP);
+                return hr;
+            }
         }
         subir_todo(s);
     }
-    return g_dip_real(dev, tipo, base, minimo, n, desde_idx, prims);
+    hr = g_dip_real(dev, tipo, base, minimo, n, desde_idx, prims);
+    EDA_G_SALIR(EDA_G_DIP);
+    return hr;
 }
 
 static void poner(void **vt, int i, void *nuevo, void **viejo);
@@ -415,10 +447,13 @@ static int reafirmar(void **vt, int i, void *nuestro, void **real, const char *q
 
 static long WINAPI mi_crear_vb(void *dev, UINT largo, DWORD uso, DWORD fvf, DWORD pool, void **vb, void *comp)
 {
+    EDA_G_ENTRAR_HR(EDA_G_CVB, M_CVB, dev, largo, uso, fvf, pool, vb, comp);
+    unsigned long ret_dir = (unsigned long)(ULONG_PTR)__builtin_return_address(0);
     int candidato = (g_buferes || g_anillo_modo) && pool == 0 /* DEFAULT */ && fvf == 0x142 && largo == 96000;
     if (candidato && !(uso & 0x200)) uso |= 0x200;                             /* + DYNAMIC, sólo éste */
     long hr = g_cvb_real(dev, largo, uso, fvf, pool, vb, comp);
-    if (hr == 0 && vb && *vb) {
+    if (hr == 0 && vb && *vb && pool == 0) rec_registrar(*vb, EDA_RT_VB, ret_dir, (unsigned long)largo);
+    if (hr == 0 && vb && *vb && (g_buferes || g_anillo_modo)) {
         anotar_candidato(*vb, candidato);
         static int anotados;
         if (pool == 0 && anotados < 24) {
@@ -434,11 +469,12 @@ static long WINAPI mi_crear_vb(void *dev, UINT largo, DWORD uso, DWORD fvf, DWOR
                 g_sombras[i].vb = NULL;
                 g_sombras[i].copia = NULL;
             }
-    if (hr == 0 && vb && *vb && !g_lock_real) {
+    if (hr == 0 && vb && *vb && (g_buferes || g_anillo_modo) && !g_lock_real) {
         poner(VT(*vb), 12, (void *)mi_unlock, (void **)&g_unlock_real);
         poner(VT(*vb), 11, (void *)mi_lock, (void **)&g_lock_real);
         apuntar("  enganchados VertexBuffer::Lock/Unlock (búferes rápidos: copia + DISCARD)");
     }
+    EDA_G_SALIR(EDA_G_CVB);
     return hr;
 }
 
@@ -510,6 +546,272 @@ static M_RESET g_reset_real;
 static M_CREARDEV g_creardev_real;
 static void *g_bloque;          /* el state block del contador (D3DSBT_ALL) */
 static void *g_bloque_dev;      /* …y el dispositivo al que pertenece */
+
+/* ── ★ (24-nov) Parte A/B: verificación de d3d9.dll, ganchos de índices y rastreador POOL_DEFAULT ── */
+static int ptr_en_d3d9_real(const void *p)
+{
+    if (!p || !g_real) return 0;
+    MEMORY_BASIC_INFORMATION m;
+    if (!VirtualQuery(p, &m, sizeof(m))) return 0;
+    return m.AllocationBase == (void *)g_real;
+}
+static void al_reentrar_gancho(int id, const char *nombre, void *directo, long veces)
+{
+    (void)id;
+    if (veces <= 5)
+        apuntar("  ★ %s en círculo (otro programa nos devuelve la llamada, #%ld): directo a d3d9 (0x%08lX)",
+                nombre ? nombre : "gancho", veces, (unsigned long)(ULONG_PTR)directo);
+}
+
+typedef long (WINAPI *M_CIB)(void *, UINT, DWORD, DWORD, DWORD, void **, void *);
+typedef long (WINAPI *M_CCUBETEX)(void *, UINT, UINT, DWORD, DWORD, DWORD, void **, void *);
+typedef long (WINAPI *M_CVOLTEX)(void *, UINT, UINT, UINT, UINT, DWORD, DWORD, DWORD, void **, void *);
+typedef long (WINAPI *M_CRT)(void *, UINT, UINT, DWORD, DWORD, DWORD, BOOL, void **, void *);
+typedef long (WINAPI *M_CDS)(void *, UINT, UINT, DWORD, DWORD, DWORD, BOOL, void **, void *);
+typedef long (WINAPI *M_ENDSB)(void *, void **);
+typedef long (WINAPI *M_SETIB)(void *, void *);
+typedef long (WINAPI *M_GETIB)(void *, void **);
+static M_CIB g_cib_real;
+static M_CCUBETEX g_ccubetex_real;
+static M_CVOLTEX g_cvoltex_real;
+static M_CRT g_crt_real;
+static M_CDS g_cds_real;
+static M_CSB g_csb_real;
+static M_ENDSB g_endsb_real;
+static M_SETIB g_setib_real;
+static M_GETIB g_getib_real;
+
+#define REC_REL_MAX 16
+typedef ULONG (WINAPI *M_REL_COM)(void *);
+static struct { void **vt; M_REL_COM real; } g_rec_rel[REC_REL_MAX];
+static int g_rec_rel_n;
+static ULONG rec_rel_comun(int k, void *obj)
+{
+    ULONG r = g_rec_rel[k].real(obj);
+    if (r == 0) eda_rec_baja(&g_rec, obj);
+    return r;
+}
+#define REC_REL_DEF(K) static ULONG WINAPI rec_rel_##K(void *obj) { return rec_rel_comun(K, obj); }
+REC_REL_DEF(0)  REC_REL_DEF(1)  REC_REL_DEF(2)  REC_REL_DEF(3)
+REC_REL_DEF(4)  REC_REL_DEF(5)  REC_REL_DEF(6)  REC_REL_DEF(7)
+REC_REL_DEF(8)  REC_REL_DEF(9)  REC_REL_DEF(10) REC_REL_DEF(11)
+REC_REL_DEF(12) REC_REL_DEF(13) REC_REL_DEF(14) REC_REL_DEF(15)
+static const M_REL_COM REC_REL_THUNKS[REC_REL_MAX] = {
+    rec_rel_0,  rec_rel_1,  rec_rel_2,  rec_rel_3,
+    rec_rel_4,  rec_rel_5,  rec_rel_6,  rec_rel_7,
+    rec_rel_8,  rec_rel_9,  rec_rel_10, rec_rel_11,
+    rec_rel_12, rec_rel_13, rec_rel_14, rec_rel_15
+};
+static HMODULE g_mod_exe, g_mod_yo;
+static HMODULE g_mod_ext_prev[32];
+static int g_mod_ext_prev_n;
+
+static void rec_enganchar_release(void *obj)
+{
+    if (!obj) return;
+    void **vt = VT(obj);
+    if (!vt) return;
+    for (int i = 0; i < g_rec_rel_n; i++)
+        if (g_rec_rel[i].vt == vt || vt[2] == (void *)REC_REL_THUNKS[i]) return;
+    if (g_rec_rel_n >= REC_REL_MAX) { g_rec.desbordado = 1; return; }
+    int k = g_rec_rel_n;
+    g_rec_rel[k].vt = vt;
+    g_rec_rel[k].real = NULL;
+    poner(vt, 2, (void *)REC_REL_THUNKS[k], (void **)&g_rec_rel[k].real);
+    if (!g_rec_rel[k].real) { g_rec.desbordado = 1; return; }
+    g_rec_rel_n++;
+}
+static int rec_en_lista_ext(HMODULE m, int agregar)
+{
+    for (int i = 0; i < g_mod_ext_prev_n; i++) if (g_mod_ext_prev[i] == m) return 1;
+    if (agregar && g_mod_ext_prev_n < 32) { g_mod_ext_prev[g_mod_ext_prev_n++] = m; return 1; }
+    return 0;
+}
+static int g_e2d_stages;
+static void rec_registrar(void *obj, int tipo, unsigned long ret_addr, unsigned long bytes)
+{
+    if (!obj) return;
+    rec_enganchar_release(obj);
+    int es_propio = g_rec_propio > 0;
+    int en_exe = 0, en_d3dx9 = 0, overlay_ok = 0;
+    if (!es_propio) {
+        if (!g_mod_exe) g_mod_exe = GetModuleHandleA(NULL);
+        if (!g_mod_yo)
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)rec_registrar, &g_mod_yo);
+        HMODULE m = NULL;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)(ULONG_PTR)ret_addr, &m) && m) {
+            if (m == g_mod_yo) es_propio = 1;
+            else if (m == g_mod_exe) en_exe = 1;
+            else if (m == g_real) overlay_ok = 1;
+            else {
+                char ruta[MAX_PATH];
+                if (GetModuleFileNameA(m, ruta, MAX_PATH)) {
+                    char *b = strrchr(ruta, '\\');
+                    const char *nom = b ? b + 1 : ruta;
+                    if (_strnicmp(nom, "d3dx9_", 6) == 0) en_d3dx9 = 1;
+                }
+                if (!en_d3dx9) overlay_ok = rec_en_lista_ext(m, g_e2d_stages == 0);
+            }
+        }
+    }
+    int orig = eda_rec_clasificar(ret_addr, es_propio, en_exe, en_d3dx9, overlay_ok);
+    eda_rec_alta(&g_rec, obj, tipo, ret_addr, orig, bytes);
+}
+static int legible(const void *p, SIZE_T n);
+static void rec_verificar_fuga_ib(void)
+{
+    int ok = g_arreglar_fuga_ib
+        && legible((const void *)(ULONG_PTR)EDA_DL_GET_SIG_ADDR, sizeof(EDA_DL_GET_SIG))
+        && legible((const void *)(ULONG_PTR)EDA_DL_SET_SIG_ADDR, sizeof(EDA_DL_SET_SIG))
+        && eda_fuga_ib_verificar_bytes((const unsigned char *)(ULONG_PTR)EDA_DL_GET_SIG_ADDR,
+                                       (const unsigned char *)(ULONG_PTR)EDA_DL_SET_SIG_ADDR);
+    eda_fuga_ib_reiniciar(&g_fuga_ib, ok);
+    apuntar("  (pantalla) fuga de índices CD3DDynamicLightWorld (0x6EE5BB/0x6EECB1): %s",
+            ok ? "firmas verificadas · corrección ACTIVA"
+               : (g_arreglar_fuga_ib ? "⚠ firmas distintas (¿otro exe?): desactivada" : "desactivada por .ini"));
+}
+static int g_rt_fix_ok;
+static int rec_legible_cb(const void *p, size_t n) { return legible(p, (SIZE_T)n); }
+static void rec_verificar_rt_motor(void)
+{
+    g_rt_fix_ok = legible((const void *)(ULONG_PTR)EDA_RT_MGR_GET_ADDR, sizeof(EDA_RT_MGR_GET_SIG))
+        && legible((const void *)(ULONG_PTR)EDA_RT_MGR_RECALL_ADDR, sizeof(EDA_RT_MGR_RECALL_SIG))
+        && legible((const void *)(ULONG_PTR)EDA_RT_RECREATE_ADDR, sizeof(EDA_RT_RECREATE_SIG))
+        && eda_rt_verificar_bytes((const unsigned char *)(ULONG_PTR)EDA_RT_MGR_GET_ADDR,
+                                  (const unsigned char *)(ULONG_PTR)EDA_RT_MGR_RECALL_ADDR,
+                                  (const unsigned char *)(ULONG_PTR)EDA_RT_RECREATE_ADDR);
+    apuntar("  (pantalla) render targets de pantalla del motor (0x665320/0x664830/0x665630): %s",
+            g_rt_fix_ok ? "firmas verificadas · ajuste ACTIVO"
+                        : "⚠ firmas distintas (¿otro exe?): desactivado");
+}
+static int g_cam_fix_ok;
+static void rec_verificar_cam_motor(void)
+{
+    g_cam_fix_ok = legible((const void *)(ULONG_PTR)EDA_CAM_INSERT_ADDR, sizeof(EDA_CAM_INSERT_SIG))
+        && legible((const void *)(ULONG_PTR)EDA_CAM_SETRECT_ADDR, sizeof(EDA_CAM_SETRECT_SIG))
+        && legible((const void *)(ULONG_PTR)EDA_CAM_SETFOV_ADDR, sizeof(EDA_CAM_SETFOV_SIG))
+        && legible((const void *)(ULONG_PTR)EDA_CAM_CREOBJ_ADDR, sizeof(EDA_CAM_CREOBJ_SIG))
+        && eda_cam_verificar_bytes((const unsigned char *)(ULONG_PTR)EDA_CAM_INSERT_ADDR,
+                                   (const unsigned char *)(ULONG_PTR)EDA_CAM_SETRECT_ADDR,
+                                   (const unsigned char *)(ULONG_PTR)EDA_CAM_SETFOV_ADDR,
+                                   (const unsigned char *)(ULONG_PTR)EDA_CAM_CREOBJ_ADDR);
+    apuntar("  (pantalla) cámaras del motor (0x4789A0/0x410DE0/0x413F60/0x410B96): %s",
+            g_cam_fix_ok ? "firmas verificadas · ajuste ACTIVO"
+                         : "⚠ firmas distintas (¿otro exe?): desactivado");
+}
+static int rec_tras_stage_seguro(char *motivo, int cap)
+{
+    int desc = 0;
+    if (eda_rec_vivo_tras_stage_seguro(&g_rec, &g_fuga_ib, &desc)) return 1;
+    if (motivo && cap > 0) {
+        if (!g_fuga_ib.activo)
+            lstrcpynA(motivo, "corrección de fuga de índices no activa (exe distinto o apagada)", cap);
+        else if (g_fuga_ib.desbordes > 0)
+            lstrcpynA(motivo, "tabla de fugas de índices desbordada", cap);
+        else if (g_rec.desbordado)
+            lstrcpynA(motivo, "rastreador POOL_DEFAULT desbordado", cap);
+        else {
+            char lista[160];
+            eda_rec_listar_origen(&g_rec, EDA_RO_DESCONOCIDO, lista, (int)sizeof(lista));
+            snprintf(motivo, (size_t)cap, "%d recurso(s) POOL_DEFAULT desconocidos vivos: %s", desc, lista[0] ? lista : "?");
+        }
+    }
+    return 0;
+}
+static void rec_soltar_ib_pend(void *ib, void **slot, void *ctx)
+{
+    (void)ctx;
+    if (slot && legible(slot, sizeof(void *)) && *slot == ib) *slot = NULL;
+    if (ib) ((M_RELEASE)VT(ib)[2])(ib);
+}
+
+static long WINAPI mi_getib(void *dev, void **pp_ib)
+{
+    EDA_G_ENTRAR_HR(EDA_G_GETIB, M_GETIB, dev, pp_ib);
+    unsigned long ret_dir = (unsigned long)(ULONG_PTR)__builtin_return_address(0);
+    long hr = g_getib_real(dev, pp_ib);
+    eda_fuga_ib_al_get(&g_fuga_ib, ret_dir, pp_ib, hr);
+    EDA_G_SALIR(EDA_G_GETIB);
+    return hr;
+}
+static long WINAPI mi_setib(void *dev, void *ib)
+{
+    EDA_G_ENTRAR_HR(EDA_G_SETIB, M_SETIB, dev, ib);
+    unsigned long ret_dir = (unsigned long)(ULONG_PTR)__builtin_return_address(0);
+    long hr = g_setib_real(dev, ib);
+    void **slot = NULL;
+    if (eda_fuga_ib_al_set(&g_fuga_ib, ret_dir, ib, &slot)) {
+        if (slot && legible(slot, sizeof(void *)) && *slot == ib) *slot = NULL;
+        ((M_RELEASE)VT(ib)[2])(ib);
+    }
+    EDA_G_SALIR(EDA_G_SETIB);
+    return hr;
+}
+static long WINAPI mi_crear_ib(void *dev, UINT largo, DWORD uso, DWORD fmt, DWORD pool, void **ib, void *comp)
+{
+    EDA_G_ENTRAR_HR(EDA_G_CIB, M_CIB, dev, largo, uso, fmt, pool, ib, comp);
+    unsigned long ret_dir = (unsigned long)(ULONG_PTR)__builtin_return_address(0);
+    long hr = g_cib_real(dev, largo, uso, fmt, pool, ib, comp);
+    if (hr == 0 && ib && *ib && pool == 0) rec_registrar(*ib, EDA_RT_IB, ret_dir, (unsigned long)largo);
+    EDA_G_SALIR(EDA_G_CIB);
+    return hr;
+}
+static long WINAPI mi_crear_cubetex(void *dev, UINT lado, UINT niv, DWORD uso, DWORD fmt, DWORD pool, void **t, void *c)
+{
+    EDA_G_ENTRAR_HR(EDA_G_CCUBETEX, M_CCUBETEX, dev, lado, niv, uso, fmt, pool, t, c);
+    unsigned long ret_dir = (unsigned long)(ULONG_PTR)__builtin_return_address(0);
+    long hr = g_ccubetex_real(dev, lado, niv, uso, fmt, pool, t, c);
+    if (hr == 0 && t && *t && pool == 0) rec_registrar(*t, EDA_RT_CUBETEX, ret_dir, (unsigned long)lado * (unsigned long)lado * 24ul);
+    EDA_G_SALIR(EDA_G_CCUBETEX);
+    return hr;
+}
+static long WINAPI mi_crear_voltex(void *dev, UINT w, UINT h, UINT d, UINT niv, DWORD uso, DWORD fmt, DWORD pool, void **t, void *c)
+{
+    EDA_G_ENTRAR_HR(EDA_G_CVOLTEX, M_CVOLTEX, dev, w, h, d, niv, uso, fmt, pool, t, c);
+    unsigned long ret_dir = (unsigned long)(ULONG_PTR)__builtin_return_address(0);
+    long hr = g_cvoltex_real(dev, w, h, d, niv, uso, fmt, pool, t, c);
+    if (hr == 0 && t && *t && pool == 0) rec_registrar(*t, EDA_RT_VOLTEX, ret_dir, (unsigned long)w * (unsigned long)h * (unsigned long)d * 4ul);
+    EDA_G_SALIR(EDA_G_CVOLTEX);
+    return hr;
+}
+static long WINAPI mi_crear_rt(void *dev, UINT w, UINT h, DWORD fmt, DWORD ms, DWORD q, BOOL lock, void **sup, void *c)
+{
+    EDA_G_ENTRAR_HR(EDA_G_CRT, M_CRT, dev, w, h, fmt, ms, q, lock, sup, c);
+    unsigned long ret_dir = (unsigned long)(ULONG_PTR)__builtin_return_address(0);
+    long hr = g_crt_real(dev, w, h, fmt, ms, q, lock, sup, c);
+    if (hr == 0 && sup && *sup) rec_registrar(*sup, EDA_RT_RT, ret_dir, (unsigned long)w * (unsigned long)h * 4ul);
+    EDA_G_SALIR(EDA_G_CRT);
+    return hr;
+}
+static long WINAPI mi_crear_ds(void *dev, UINT w, UINT h, DWORD fmt, DWORD ms, DWORD q, BOOL disc, void **sup, void *c)
+{
+    EDA_G_ENTRAR_HR(EDA_G_CDS, M_CDS, dev, w, h, fmt, ms, q, disc, sup, c);
+    unsigned long ret_dir = (unsigned long)(ULONG_PTR)__builtin_return_address(0);
+    long hr = g_cds_real(dev, w, h, fmt, ms, q, disc, sup, c);
+    if (hr == 0 && sup && *sup) rec_registrar(*sup, EDA_RT_DS, ret_dir, (unsigned long)w * (unsigned long)h * 4ul);
+    EDA_G_SALIR(EDA_G_CDS);
+    return hr;
+}
+static long WINAPI mi_crear_sb(void *dev, DWORD tipo, void **sb)
+{
+    EDA_G_ENTRAR_HR(EDA_G_CSB, M_CSB, dev, tipo, sb);
+    unsigned long ret_dir = (unsigned long)(ULONG_PTR)__builtin_return_address(0);
+    long hr = g_csb_real(dev, tipo, sb);
+    if (hr == 0 && sb && *sb) rec_registrar(*sb, EDA_RT_SB, ret_dir, 0ul);
+    EDA_G_SALIR(EDA_G_CSB);
+    return hr;
+}
+static long WINAPI mi_endsb(void *dev, void **sb)
+{
+    EDA_G_ENTRAR_HR(EDA_G_ENDSB, M_ENDSB, dev, sb);
+    unsigned long ret_dir = (unsigned long)(ULONG_PTR)__builtin_return_address(0);
+    long hr = g_endsb_real(dev, sb);
+    if (hr == 0 && sb && *sb) rec_registrar(*sb, EDA_RT_SB, ret_dir, 0ul);
+    EDA_G_SALIR(EDA_G_ENDSB);
+    return hr;
+}
 
 /* ── el reloj ──────────────────────────────────────────────────────────── */
 static LARGE_INTEGER g_frec, g_proximo, g_ventana;
@@ -1360,7 +1662,7 @@ static void barra_xy(HWND h, int x, int y, const char *por, int ya800)
     BYTE *esc = leer_ptr((void *)0x934554);
     int pc = pantalla_costado(esc);
     RECT r;
-    if (!ya800 && e2d_activa()) e2d_ventana_a_ui(h, &x, &y);           /* ★ (Punto 5) la interfaz escalada */
+    if (!ya800 && e2d_raton()) e2d_ventana_a_ui(h, &x, &y);            /* ★ (Punto 5 / 24-nov) la interfaz escalada / estirada */
     else if (!ya800 && GetClientRect(h, &r) && r.right > 0 && r.bottom > 0) {   /* (en la pantalla de 800×600) */
         x = x * 800 / r.right;
         y = y * 600 / r.bottom;
@@ -1542,7 +1844,7 @@ static void cursor_juego_esconder(const char *quien)
      *   panel: el salto que se veía al abrir). En pantalla completa el juego tiene el mouse de Windows en SU 800×600
      *   (sin escalar) y el dibujo estirado: se lo pone en el punto estirado ANTES de que la flecha se vea. */
     RECT r;
-    if (e2d_activa() && g_ventana_juego) {                  /* ★ (Punto 5) la interfaz escalada y centrada */
+    if (e2d_raton() && g_ventana_juego) {                    /* ★ (Punto 5 / 24-nov) cliente ↔ backbuffer ↔ interfaz */
         POINT s = {x, y};
         e2d_ui_a_ventana(g_ventana_juego, (int *)&s.x, (int *)&s.y);
         if (ClientToScreen(g_ventana_juego, &s)) SetCursorPos(s.x, s.y);
@@ -1902,7 +2204,7 @@ static BOOL WINAPI mi_peek(LPMSG m, HWND h, UINT a, UINT b, UINT r)
     msn_correr_cola();                               /* (lo que el Messenger le pide al server) */
     if (g_panel_siguiente) panel_siguiente_tick();   /* (un panel a la vez: el que se pidió con el otro abierto) */
     if (g_ubicar && (g_vueltas & 127) == 0) opc_ubicar_tick();
-    if ((g_pantalla_pedida >= 0 || g_sin_bordes) && (g_vueltas & 63) == 0) opc_pantalla_tick();
+    if (g_pantalla_pedida >= 0 || (g_sin_bordes && (g_vueltas & 63) == 0)) opc_pantalla_tick();
     if (g_pan_vivo_w || g_pan_vivo_esperando || g_gr_rehacer) pan_vivo_tick();   /* ★ (Punto 5/6) resolución / antialias en vivo */
     /* ★ (19-nov noche, Punto 5) LOS GANCHOS TAMBIÉN DESDE EL BUCLE DE MENSAJES. Medido 16:28:54 (dueño, TEST, 1,5 s
      *   después de empezar el Stage): otro programa reescribió la tabla del dispositivo ENTERA, Present incluido. Con
@@ -2256,7 +2558,11 @@ static void dibujar_contador(void *dev)
      *   aplicarle el del viejo le ponía estados ajenos (glitches) y el contador desaparecía (11-nov).
      *   El del dispositivo viejo se abandona sin tocarlo (ese dispositivo ya puede no existir). */
     if (g_bloque && g_bloque_dev != dev) g_bloque = NULL;
-    if (!g_bloque && ((M_CSB)vt[I_CREATESB])(dev, 1 /* D3DSBT_ALL */, &g_bloque) != 0) g_bloque = NULL;
+    if (!g_bloque) {
+        EDA_REC_PROPIO_INC();
+        if (((M_CSB)vt[I_CREATESB])(dev, 1 /* D3DSBT_ALL */, &g_bloque) != 0) g_bloque = NULL;
+        EDA_REC_PROPIO_DEC();
+    }
     g_bloque_dev = dev;
     if (g_bloque) ((M_SB)VT(g_bloque)[4])(g_bloque);            /* Capture */
     ((M_SIN)vt[I_BEGINSCENE])(dev);
@@ -2282,6 +2588,7 @@ static void dibujar_contador(void *dev)
 /* ── los ganchos ───────────────────────────────────────────────────────── */
 static long WINAPI mi_present(void *dev, const RECT *a, const RECT *b, HWND w, const void *r)
 {
+    EDA_G_ENTRAR_HR(EDA_G_PRESENT, M_PRESENT, dev, a, b, w, r);
     LARGE_INTEGER ahora;
     QueryPerformanceCounter(&ahora);
     InterlockedIncrement(&c_present);
@@ -2335,37 +2642,123 @@ static long WINAPI mi_present(void *dev, const RECT *a, const RECT *b, HWND w, c
     if (g_medir5) medir5_present(dev);              /* ★ (Punto 5) sólo lectura, sólo en la prueba */
     aviso_cuadro(w);                                             /* ★ (19-nov) el aviso de arranque: crear / cerrar */
     long hr = g_present_real(dev, a, b, w, r);
+    EDA_G_SALIR(EDA_G_PRESENT);
     esperar_tope();
     return hr;
 }
 
-static long WINAPI mi_reset(void *dev, void *pp)
+static void pan_monitor_actual(HWND foco, int *mw, int *mh)
 {
+    *mw = 0; *mh = 0;
+    HWND v = foco ? foco : g_ventana_juego;
+    MONITORINFO mi = {sizeof(mi)};
+    if (v && GetMonitorInfoW(MonitorFromWindow(v, MONITOR_DEFAULTTONEAREST), &mi)) {
+        *mw = mi.rcMonitor.right - mi.rcMonitor.left;
+        *mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        if (*mw > 0 && *mh > 0) return;
+    }
+    if (mon_nativa(g_pantalla_monitor, mw, mh)) return;
+    *mw = GetSystemMetrics(SM_CXSCREEN);
+    *mh = GetSystemMetrics(SM_CYSCREEN);
+}
+
+static int rec_ajustar_rt_motor(int old_w, int old_h, int new_w, int new_h)
+{
+    if (!g_rt_fix_ok || new_w < 320 || new_h < 200) return 0;
+    if (!legible((const void *)(ULONG_PTR)EDA_RT_MGR_INIT_ADDR, 1)
+        || !(*(const BYTE *)(ULONG_PTR)EDA_RT_MGR_INIT_ADDR & 1)
+        || !legible((const void *)(ULONG_PTR)EDA_RT_MGR_HEAD_ADDR, sizeof(void *)))
+        return 0;
+    void *head = *(void *const *)(ULONG_PTR)EDA_RT_MGR_HEAD_ADDR;
+    return eda_rt_ajustar_arbol(head, old_w, old_h, new_w, new_h, g_e2d_viejos, g_e2d_viejos_n, rec_legible_cb);
+}
+
+static int rec_ajustar_cam_motor(int old_w, int old_h, int new_w, int new_h)
+{
+    if (!g_cam_fix_ok || new_w < 320 || new_h < 200) return 0;
+    if (!legible((const void *)(ULONG_PTR)EDA_CAM_MGR_ADDR, sizeof(void *))) return 0;
+    unsigned char *mgr = *(unsigned char *const *)(ULONG_PTR)EDA_CAM_MGR_ADDR;
+    if (!mgr || !legible(mgr + EDA_CAM_LIST_OFS, sizeof(EDA_LT_LINK))) return 0;
+    return eda_cam_ajustar_lista(mgr + EDA_CAM_LIST_OFS, old_w, old_h, new_w, new_h,
+                                 g_e2d_viejos, g_e2d_viejos_n, rec_legible_cb);
+}
+
+static long WINAPI mi_reset_cuerpo(void *dev, void *pp)
+{
+    int old_w = g_e2d_w, old_h = g_e2d_h;
     if (g_bloque) {
         if (g_bloque_dev == dev)
             ((M_SB)VT(g_bloque)[2])(g_bloque);                     /* Release (si no, Reset falla) */
         g_bloque = NULL;                                          /* (el de otro dispositivo: ni tocarlo) */
+        g_bloque_dev = NULL;
     }
-    rojo_soltar();                                           /* (diag rojo: lo suyo del pool DEFAULT) */
-    gr_soltar();                                             /* (el state block del brillo) */
+    rojo_soltar_dev(dev);                                    /* (diag rojo: lo suyo del pool DEFAULT) */
+    gr_soltar_dev(dev);                                      /* (el state block del brillo) */
     gr_ambiente_soltar();                                    /* (las superficies de las franjas: pool DEFAULT) */
     sombras_olvidar();
     ajustar_pp(pp);
-    gr_ajustar_pp(pp);                                       /* ★ (Punto 6) el antialias */
-    e2d_dispositivo(NULL, pp);                               /* ★ (Punto 5) el tamaño nuevo (si escala2d) */
+    gr_ajustar_pp(pp);                                       /* ★ (Punto 6 / 24-nov) el antialias (0 si > 1920×1080) */
     /* ★ (20-nov) lo que quedó PUESTO (texturas por etapa, streams, índices, destinos) se saca antes: si no, un recurso del
      *   pool DEFAULT ya soltado por su dueño sigue vivo y el Reset da 0x8876086C (el cierre tras un Stage; ver
      *   gr_reset_desligar). El Reset deja todo sin poner igual: para el motor es lo mismo. */
-    char puestos_diag[400];
+    char puestos_diag[400], plan_b[32];
     int puestos = 0;
     puestos_diag[0] = 0;
     if (g_gr_desligar) puestos = gr_reset_desligar(dev, (void *)g_sss_real, (void *)g_e2d_rt_real, puestos_diag, sizeof(puestos_diag));
-    long hr = g_reset_real(dev, pp);
-    apuntar("Reset -> 0x%08lx", (unsigned long)hr);
+    /* ★ (24-nov) si SaveState (0x6EE5BB) dejó alguna referencia de índices sin su RestoreState, se drena aquí */
+    int drenados = eda_fuga_ib_drenar(&g_fuga_ib, rec_soltar_ib_pend, NULL);
+    if (drenados > 0)
+        apuntar("  ★ Reset: %d referencia(s) de índices fugadas de CD3DDynamicLightWorld liberadas antes del Reset", drenados);
+    long hr = gr_reset_plan_b(dev, pp, g_reset_real, g_ini, plan_b, (int)sizeof(plan_b));
+    if (hr == 0) {
+        e2d_dispositivo(NULL, pp);                           /* ★ (24-nov) escalador y medición con el tamaño REAL */
+        if (pp && strstr(plan_b, "tamano_bueno")) {
+            g_res_w = (int)((DWORD *)pp)[0];
+            g_res_h = (int)((DWORD *)pp)[1];
+        }
+        /* ★ (24-nov) Antes de volver a CD3D_Device::RestoreAll → CD3D_RenderTargetMgr::RecreateAll (0x664830),
+         *   actualizar m_nWidth/m_nHeight de los render targets de pantalla del motor al tamaño nuevo: si no,
+         *   0x6656BA los rehace con el tamaño viejo y en el Stage vuelve la distorsión («efecto agua»). */
+        int new_w = pp ? (int)((DWORD *)pp)[0] : g_e2d_w;
+        int new_h = pp ? (int)((DWORD *)pp)[1] : g_e2d_h;
+        int rt_adj = rec_ajustar_rt_motor(old_w, old_h, new_w, new_h);
+        if (rt_adj > 0)
+            apuntar("  ★ Reset: %d render target(s) de pantalla del motor ajustados → %d×%d", rt_adj, new_w, new_h);
+        int cam_adj = rec_ajustar_cam_motor(old_w, old_h, new_w, new_h);
+        if (cam_adj > 0)
+            apuntar("  ★ Reset: %d cámara(s) del motor ajustadas → %d×%d (rect + FovY)", cam_adj, new_w, new_h);
+        if (g_e2d_stages > 0)
+            apuntar("  ★ Reset tras %d Stage(s) → OK · fugas IB corregidas: %ld (drenadas: %d) · POOL_DEFAULT restantes: %d",
+                    g_e2d_stages, g_fuga_ib.arregladas, drenados, g_rec.vivos);
+    } else if (g_rec.vivos > 0) {
+        char vivos_txt[240];
+        eda_rec_listar_origen(&g_rec, 0, vivos_txt, (int)sizeof(vivos_txt));
+        apuntar("  ⚠ Reset falló (0x%08lx) con %d recurso(s) POOL_DEFAULT vivos (motor %d · overlay %d · propio %d · desc %d): %s",
+                (unsigned long)hr, g_rec.vivos, g_rec.vivos_origen[EDA_RO_MOTOR], g_rec.vivos_origen[EDA_RO_OVERLAY],
+                g_rec.vivos_origen[EDA_RO_PROPIO], g_rec.vivos_origen[EDA_RO_DESCONOCIDO], vivos_txt[0] ? vivos_txt : "?");
+    }
+    {
+        int mw = 0, mh = 0;
+        int bw = pp ? (int)((DWORD *)pp)[0] : g_e2d_w, bh = pp ? (int)((DWORD *)pp)[1] : g_e2d_h;
+        pan_monitor_actual(NULL, &mw, &mh);
+        dg_pantalla("reset", bw, bh, g_sin_bordes || g_pantalla_pedida == 1, mw, mh,
+                    g_gr_aa_puesto > 0 ? g_gr_aa_puesto : 0, GR_PERFILES[g_gr_perfil], (unsigned long)hr, plan_b);
+    }
     if (puestos || hr)
         apuntar("  ★ Reset: %s%d del pool DEFAULT seguían puestos y se sacaron antes:%s%s", g_gr_desligar ? "" : "(reset_desligar=0: NO se sacan) ",
                 puestos, puestos_diag[0] ? puestos_diag : " ninguno",
                 hr ? " · ⚠ igual FALLÓ: algún dueño todavía tiene un recurso DEFAULT (o un state block / swap chain extra)" : "");
+    return hr;
+}
+
+/* ★ (24-nov) EL RESET EN CÍRCULO (guardia general en eda_ganchos.h): si otro programa (overlay) nos devuelve
+ *   la llamada al Reset (o a cualquier otro gancho), esa reentrada en el mismo hilo va DIRECTO al original de
+ *   d3d9.dll verificado por VirtualQuery → AllocationBase == g_real. */
+static long WINAPI mi_reset(void *dev, void *pp)
+{
+    EDA_G_ENTRAR_HR(EDA_G_RESET, M_RESET, dev, pp);
+    long hr = mi_reset_cuerpo(dev, pp);
+    EDA_G_SALIR(EDA_G_RESET);
     return hr;
 }
 
@@ -2387,31 +2780,74 @@ static long WINAPI mi_crear_dispositivo(void *d3d, UINT adaptador, DWORD tipo, H
     g_gr_adaptador = adaptador;
     gr_placa(d3d, adaptador);
     gr_ajustar_pp(pp);
+    const char *plan_b = "ninguno";
     long hr = g_creardev_real(d3d, adaptador, tipo, foco, flags, pp, dev);
     if (hr != 0 && g_gr_aa_puesto > 0) {                     /* (con antialias no se pudo: sin él, como siempre) */
-        int pedido = g_gr_aa;
         apuntar("  (gráficos) ⚠ CreateDevice con antialias %d× → 0x%08lx: otra vez SIN antialias", g_gr_aa_puesto, (unsigned long)hr);
         g_gr_aa = 0;
-        gr_ajustar_pp(pp);
-        g_gr_aa = pedido;
         g_gr_aa_max = 0;                                     /* (no se vuelve a intentar en esta sesión) */
+        gr_ajustar_pp(pp);
         hr = g_creardev_real(d3d, adaptador, tipo, foco, flags, pp, dev);
+        if (hr == 0) {
+            plan_b = "sin_aa";
+            if (g_ini[0]) WritePrivateProfileStringA("graficos", "antialias", "0", g_ini);
+        } else {
+            plan_b = "fallo";
+        }
+    } else if (hr != 0) {
+        plan_b = "fallo";
     }
-    apuntar("CreateDevice(adaptador %u, flags 0x%lx, swap %lu, pflags 0x%lx, intervalo 0x%lx) -> 0x%08lx",
-            adaptador, (unsigned long)flags, (unsigned long)((DWORD *)pp)[6], (unsigned long)((DWORD *)pp)[11],
+    apuntar("CreateDevice(adaptador %u, %lux%lu, flags 0x%lx, swap %lu, pflags 0x%lx, intervalo 0x%lx) -> 0x%08lx",
+            adaptador, pp ? (unsigned long)((DWORD *)pp)[0] : 0ul, pp ? (unsigned long)((DWORD *)pp)[1] : 0ul,
+            (unsigned long)flags, (unsigned long)((DWORD *)pp)[6], (unsigned long)((DWORD *)pp)[11],
             (unsigned long)((DWORD *)pp)[13], (unsigned long)hr);
+    {
+        int mw = 0, mh = 0;
+        int bw = pp ? (int)((DWORD *)pp)[0] : g_res_w, bh = pp ? (int)((DWORD *)pp)[1] : g_res_h;
+        pan_monitor_actual(foco, &mw, &mh);
+        dg_pantalla("crear", bw, bh, g_sin_bordes || g_pantalla_pedida == 1, mw, mh,
+                    g_gr_aa_puesto > 0 ? g_gr_aa_puesto : 0, GR_PERFILES[g_gr_perfil], (unsigned long)hr, plan_b);
+    }
     if (hr == 0 && dev && *dev) {
+        gr_anotar_bueno(pp);                                 /* ★ (24-nov) último tamaño bueno para plan B de Reset */
+        eda_rec_reiniciar(&g_rec);                           /* ★ (24-nov) dispositivo nuevo: tabla POOL_DEFAULT limpia */
+        eda_fuga_ib_limpiar_pendientes(&g_fuga_ib);
         void **vt = VT(*dev);
+        if (g_vt_dev && g_vt_dev != vt) eda_g_reiniciar_slots(&g_ganchos);
         g_vt_dev = vt;
         poner(vt, I_PRESENT, (void *)mi_present, (void **)&g_present_real);
+        eda_g_registrar(&g_ganchos, EDA_G_PRESENT, I_PRESENT, "Present", (void *)mi_present, (void *)g_present_real);
         poner(vt, I_RESET, (void *)mi_reset, (void **)&g_reset_real);
+        eda_g_registrar(&g_ganchos, EDA_G_RESET, I_RESET, "Reset", (void *)mi_reset, (void *)g_reset_real);
+        poner(vt, 26 /* CreateVertexBuffer */, (void *)mi_crear_vb, (void **)&g_cvb_real);
+        eda_g_registrar(&g_ganchos, EDA_G_CVB, 26, "CreateVertexBuffer", (void *)mi_crear_vb, (void *)g_cvb_real);
+        poner(vt, 27 /* CreateIndexBuffer */, (void *)mi_crear_ib, (void **)&g_cib_real);
+        eda_g_registrar(&g_ganchos, EDA_G_CIB, 27, "CreateIndexBuffer", (void *)mi_crear_ib, (void *)g_cib_real);
+        poner(vt, 24 /* CreateCubeTexture */, (void *)mi_crear_cubetex, (void **)&g_ccubetex_real);
+        eda_g_registrar(&g_ganchos, EDA_G_CCUBETEX, 24, "CreateCubeTexture", (void *)mi_crear_cubetex, (void *)g_ccubetex_real);
+        poner(vt, 25 /* CreateVolumeTexture */, (void *)mi_crear_voltex, (void **)&g_cvoltex_real);
+        eda_g_registrar(&g_ganchos, EDA_G_CVOLTEX, 25, "CreateVolumeTexture", (void *)mi_crear_voltex, (void *)g_cvoltex_real);
+        poner(vt, 28 /* CreateRenderTarget */, (void *)mi_crear_rt, (void **)&g_crt_real);
+        eda_g_registrar(&g_ganchos, EDA_G_CRT, 28, "CreateRenderTarget", (void *)mi_crear_rt, (void *)g_crt_real);
+        poner(vt, 29 /* CreateDepthStencilSurface */, (void *)mi_crear_ds, (void **)&g_cds_real);
+        eda_g_registrar(&g_ganchos, EDA_G_CDS, 29, "CreateDepthStencilSurface", (void *)mi_crear_ds, (void *)g_cds_real);
+        poner(vt, 59 /* CreateStateBlock */, (void *)mi_crear_sb, (void **)&g_csb_real);
+        eda_g_registrar(&g_ganchos, EDA_G_CSB, 59, "CreateStateBlock", (void *)mi_crear_sb, (void *)g_csb_real);
+        poner(vt, 61 /* EndStateBlock */, (void *)mi_endsb, (void **)&g_endsb_real);
+        eda_g_registrar(&g_ganchos, EDA_G_ENDSB, 61, "EndStateBlock", (void *)mi_endsb, (void *)g_endsb_real);
+        poner(vt, 104 /* SetIndices */, (void *)mi_setib, (void **)&g_setib_real);
+        eda_g_registrar(&g_ganchos, EDA_G_SETIB, 104, "SetIndices", (void *)mi_setib, (void *)g_setib_real);
+        poner(vt, 105 /* GetIndices */, (void *)mi_getib, (void **)&g_getib_real);
+        eda_g_registrar(&g_ganchos, EDA_G_GETIB, 105, "GetIndices", (void *)mi_getib, (void *)g_getib_real);
         if (g_buferes) {
-            poner(vt, 26 /* CreateVertexBuffer */, (void *)mi_crear_vb, (void **)&g_cvb_real);
             poner(vt, 100 /* SetStreamSource */, (void *)mi_sss, (void **)&g_sss_real);
+            eda_g_registrar(&g_ganchos, EDA_G_SSS, 100, "SetStreamSource", (void *)mi_sss, (void *)g_sss_real);
             poner(vt, 81 /* DrawPrimitive */, (void *)mi_dp, (void **)&g_dp_real);
+            eda_g_registrar(&g_ganchos, EDA_G_DP, 81, "DrawPrimitive", (void *)mi_dp, (void *)g_dp_real);
             poner(vt, 82 /* DrawIndexedPrimitive */, (void *)mi_dip, (void **)&g_dip_real);
+            eda_g_registrar(&g_ganchos, EDA_G_DIP, 82, "DrawIndexedPrimitive", (void *)mi_dip, (void *)g_dip_real);
         }
-        apuntar("  enganchados Present y Reset · tope %d cuadros/s · contador %s · búferes rápidos %s",
+        apuntar("  enganchados Present, Reset, índices y recursos POOL_DEFAULT · tope %d cuadros/s · contador %s · búferes rápidos %s",
                 g_tope, g_mostrar ? "sí" : "no", g_buferes ? "sí" : "no");
         e2d_dispositivo(vt, pp);                             /* ★ (Punto 5) sólo con [pantalla] escala2d=1 */
         gr_dispositivo(vt, *dev);                            /* ★ (Punto 6) filtrado, destello rojo */
@@ -2514,6 +2950,7 @@ static void leer_ajustes(HMODULE self)
     if (GetEnvironmentVariableA("EDA_REPARAR_APIS", v, sizeof(v))) g_apis = atoi(v);
     if (GetEnvironmentVariableA("EDA_PROBAR_LOCALE", v, sizeof(v))) g_apis_probar = atoi(v);
     medir5_leer_env();                               /* ★ (Punto 5) EDA_RES_PRUEBA: sólo la prueba */
+    g_arreglar_fuga_ib = GetPrivateProfileIntA("pantalla", "arreglar_fuga_ib", 1, ini) != 0;
     e2d_leer_ini(ini);                               /* ★ (Punto 5/6) [pantalla]: la adaptación 2D, siempre */
     gr_leer_ini(ini);                                /* ★ (Punto 6) [graficos] */
     if (GetEnvironmentVariableA("EDA_TOPE_FPS", v, sizeof(v))) g_tope = atoi(v);
@@ -2575,9 +3012,18 @@ static int reafirmar(void **vt, int i, void *nuestro, void **real, const char *q
     *real = ahora;
     vt[i] = nuestro;
     VirtualProtect(&vt[i], sizeof(void *), prot, &prot);
+    for (int k = 0; k < EDA_G_NUM; k++)
+        if (g_ganchos.s[k].nuestro == nuestro) { eda_g_al_reafirmar(&g_ganchos, k, ahora); break; }
     static LONG avisos;                                  /* (si otro programa peleara cada cuadro: el registro no se llena) */
-    if (InterlockedIncrement(&avisos) <= 60)
-        apuntar("  ⚠ otro programa pisó el gancho de %s (0x%08lX): encadenado, el nuestro vuelve", que, (unsigned long)(ULONG_PTR)ahora);
+    {
+        HMODULE m = NULL;
+        char quien[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)ahora, &m) && m)
+            GetModuleFileNameA(m, quien, sizeof(quien));
+        if (InterlockedIncrement(&avisos) <= 60)
+            apuntar("  ⚠ otro programa pisó el gancho de %s (0x%08lX, %s): encadenado, el nuestro vuelve", que,
+                    (unsigned long)(ULONG_PTR)ahora, quien);
+    }
     {
         static LONG listados;
         if (g_diagnostico && InterlockedIncrement(&listados) == 1) modulos_listar();
@@ -2590,13 +3036,23 @@ static void reafirmar_ganchos(void)
     if (!vt) return;
     reafirmar(vt, I_PRESENT, (void *)mi_present, (void **)&g_present_real, "Present");
     reafirmar(vt, I_RESET, (void *)mi_reset, (void **)&g_reset_real, "Reset");
-    if (g_cvb_real) {
-        reafirmar(vt, 26, (void *)mi_crear_vb, (void **)&g_cvb_real, "CreateVertexBuffer");
+    if (g_cvb_real) reafirmar(vt, 26, (void *)mi_crear_vb, (void **)&g_cvb_real, "CreateVertexBuffer");
+    if (g_cib_real) reafirmar(vt, 27, (void *)mi_crear_ib, (void **)&g_cib_real, "CreateIndexBuffer");
+    if (g_ccubetex_real) reafirmar(vt, 24, (void *)mi_crear_cubetex, (void **)&g_ccubetex_real, "CreateCubeTexture");
+    if (g_cvoltex_real) reafirmar(vt, 25, (void *)mi_crear_voltex, (void **)&g_cvoltex_real, "CreateVolumeTexture");
+    if (g_crt_real) reafirmar(vt, 28, (void *)mi_crear_rt, (void **)&g_crt_real, "CreateRenderTarget");
+    if (g_cds_real) reafirmar(vt, 29, (void *)mi_crear_ds, (void **)&g_cds_real, "CreateDepthStencilSurface");
+    if (g_csb_real) reafirmar(vt, 59, (void *)mi_crear_sb, (void **)&g_csb_real, "CreateStateBlock");
+    if (g_endsb_real) reafirmar(vt, 61, (void *)mi_endsb, (void **)&g_endsb_real, "EndStateBlock");
+    if (g_setib_real) reafirmar(vt, 104, (void *)mi_setib, (void **)&g_setib_real, "SetIndices");
+    if (g_getib_real) reafirmar(vt, 105, (void *)mi_getib, (void **)&g_getib_real, "GetIndices");
+    if (g_sss_real) {
         reafirmar(vt, 100, (void *)mi_sss, (void **)&g_sss_real, "SetStreamSource");
         reafirmar(vt, 81, (void *)mi_dp, (void **)&g_dp_real, "DrawPrimitive");
         reafirmar(vt, 82, (void *)mi_dip, (void **)&g_dip_real, "DrawIndexedPrimitive");
     }
     e2d_reafirmar(vt, reafirmar);                            /* ★ (Punto 5) sólo si escala2d los puso */
+    gr_reafirmar(vt, reafirmar);                             /* ★ (Punto 6) filtrado, texturas y render targets */
 }
 
 /* ★ (20-nov) diag del «Close de Capítulos no responde» (1920 pantalla completa; a 800 y 1280 en ventana sí) y de la zona
@@ -2701,9 +3157,15 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD razon, LPVOID reservado)
     lstrcatA(sys, "\\d3d9.dll");
     g_real = LoadLibraryA(sys);
     if (!g_real) return FALSE;
+    eda_g_iniciar(&g_ganchos, ptr_en_d3d9_real, al_reentrar_gancho);
     g_crear = (CREAR9)GetProcAddress(g_real, "Direct3DCreate9");
     if (!g_crear) return FALSE;
     leer_ajustes((HMODULE)self);
+    if (g_mejoras) {
+        rec_verificar_fuga_ib();
+        rec_verificar_rt_motor();
+        rec_verificar_cam_motor();
+    }
     QueryPerformanceFrequency(&g_frec);
     timeBeginPeriod(1);                                          /* Sleep(1) ≈ 1 ms */
     apuntar("──────── eda_d3d9 cargada · el d3d9 real: %s · mejoras %d · tope %d · contador %d · caja negra %d"

@@ -2531,3 +2531,17 @@ CreateVertexBuffer del dispositivo y `WSAEventSelect` del exe (por su tabla de i
 - **Para trabajar siempre sobre lo que reciben los jugadores**: `py jugar.py --como-launcher` (el exe del
   repo + la dll, sin Frida; usa la dll recién compilada si es más nueva que la del repo). La dll se compila
   con `herramientas/dll_d3d9/bajar_zig.py` (una vez) + `compilar.py`, y GitHub la compila en cada PR.
+
+### 58 · Caída `0x752B7E` al volver de una stage al lobby (investigación estática, 23-nov)
+
+- **Dónde cae:** `0x00752B7E` (`mov edi, dword ptr [esi]`), dentro de la función **`0x00752B70`** (`thiscall`, `esi = ecx`, argumento `bool` en `[ebp+8]`). Lectura de `0x00000000` (`0xC0000005`) porque `this` (`esi`) es **NULL**.
+- **Qué objeto es `esi`:** el gestor de interfaz de la escena (tamaño `0x98`, constructor `0x007532C0`), guardado como puntero inteligente en **`[escena + 0x14]`**. Su campo `+0x0` es la cabeza de la lista enlazada de controles GUI (`+0x2C` siguiente, `+0x4` ID, `+0xA` habilitado). `0x752B70(0)` guarda el estado `+0xA` de cada control en una pila de 5 mapas (`esi + 0x50`, índice en `esi + 0x8C`) y los deshabilita todos; `0x752B70(1)` restaura el nivel superior y libera ese mapa.
+- **Los 7 llamados a `0x752B70` en `EDA_limpio.exe`:**
+  - `0x4DEA35`, `0x754106`, `0x754147`, `0x760D07` y `0x760D42` comprueban `ecx != NULL` antes de llamar.
+  - **`0x4DA96A`** (en `0x4DA940`, bloqueo de la interfaz al esperar respuesta del server) y **`0x4DA9A7`** (en **`0x4DA990`**, desbloqueo al llegar la respuesta, cuando `[escena + 0x34] == 0`) son los **únicos dos** sitios que cargan `ecx = [escena + 0x14]` **sin comprobar si es NULL**.
+- **Por qué llega NULL al volver de una stage al lobby:**
+  1. `BaseScene::OnEnter` (`0x4DE840` → `0x4DE906`) reserva el gestor y lo guarda en `[escena + 0x14]`.
+  2. Al cambiar de escena (`0x4E6B40`), se ejecuta `OnExit` de la escena saliente (`Stage::OnExit` `0x50AD30` → `BaseScene::OnExit` `0x4DC280` → `0x4DB8D0`), que **destruye el gestor y pone `[escena + 0x14] = 0`**.
+  3. Sin embargo, al inicializar la escena de Stage (`0x5005B0` → `0x548F80`), todos sus manejadores de red (`0x1058`, `0x1060`, `0x1062`, `0x1071`, `0x1072`, `0x1073`, `0x1054`, **`0x1075` → `0x546F40`**, `0x105D`) se registran una vez en el despachador **global** (`[App + 0x48] + 4`) ligados permanentemente a `this = escena_stage`. El bucle de red (`0x4E56FD`) despacha los paquetes por comando sin comprobar si esa escena sigue activa (`[App + 0x44]`).
+  4. `0x4DA990` es llamada al principio de **46 manejadores S→C**, incluido **`0x546F40` (`0x1075`, vuelta al lobby)**. Si llega un `0x1075` (por ejemplo, un `0x1075` diferido de `game_over` a 6 s o un segundo `0x1075`) **después** de que la escena de Stage ya salió (`[escena_stage + 0x14] == NULL`, estando ya en el lobby o en la sala tras AWARD RESULTS), `0x546F40` invoca `0x4DA990` con `this = escena_stage` → `0x752B70(1)` con `ecx = NULL` → caída inmediata en `0x752B7E`.
+- **Estado:** sólo investigado y documentado (sin tocar el exe ni el server en esta rama). Vías limpias para corregirlo aparte: en el server, no enviar un `0x1075` diferido/duplicado si el jugador ya abandonó la stage; o en la DLL, comprobar `ecx != 0` en `0x752B70`/`0x4DA990`.

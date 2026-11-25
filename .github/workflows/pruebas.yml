@@ -85,6 +85,9 @@ jobs:
           python3 -c 'import sys, compilar; sys.exit(0 if compilar.control_fuentes() else 1)'
           python3 ../../traduccion/herramientas/hoja.py control
           gcc -std=gnu11 -o /tmp/prueba_apis prueba_apis.c && /tmp/prueba_apis ../../exe/EDA_limpio.exe
+          gcc -std=gnu11 -o /tmp/prueba_escala2d prueba_escala2d.c -lm && /tmp/prueba_escala2d
+          gcc -std=gnu11 -o /tmp/prueba_graficos prueba_graficos.c -lm && /tmp/prueba_graficos
+          gcc -std=gnu11 -Wall -Werror -o /tmp/prueba_pantalla prueba_pantalla.c -lm && /tmp/prueba_pantalla ../../exe/EDA_limpio.exe
           gcc -std=gnu11 -Wall -Werror -o /tmp/prueba_traduccion prueba_traduccion.c && /tmp/prueba_traduccion ../../exe/EDA_limpio.exe ../..
           zig cc -target x86-windows-gnu -shared -O2 -s -o d3d9.dll eda_d3d9.c d3d9.def \
             -lkernel32 -luser32 -lwinmm -lws2_32 -liphlpapi -lgdi32

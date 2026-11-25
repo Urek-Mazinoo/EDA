@@ -429,32 +429,52 @@ static int g_pantalla_monitor = 1, g_sin_bordes;
 static LONG g_estilo_viejo;
 static RECT g_rect_viejo;
 static int opc_monitores(RECT *salida);
+static int mon_info(int k, RECT *entero, RECT *trabajo);
+static void pan_vivo_ventana(int w, int h);
 static void opc_poner_sin_bordes(int si)
 {
     HWND v = g_ventana_juego;
     if (!v) return;
     LONG estilo = GetWindowLongA(v, GWL_STYLE);
+    static int sb_mon;
     if (si) {
-        RECT mon[8], r;
-        int n = opc_monitores(mon), k = g_pantalla_monitor >= 1 && g_pantalla_monitor <= n ? g_pantalla_monitor : 1;
-        MONITORINFO mi = {sizeof(mi)};
-        if (k == 1 || !GetMonitorInfoW(MonitorFromRect(&mon[k - 1], MONITOR_DEFAULTTONEAREST), &mi))
+        RECT r;
+        int n = mon_info(g_pantalla_monitor, &r, NULL);
+        int k = g_pantalla_monitor >= 1 && g_pantalla_monitor <= n ? g_pantalla_monitor : 1;
+        if (!n) {
+            MONITORINFO mi = {sizeof(mi)};
             GetMonitorInfoW(MonitorFromWindow(v, MONITOR_DEFAULTTOPRIMARY), &mi);
-        if (k > 1) GetMonitorInfoW(MonitorFromRect(&mon[k - 1], MONITOR_DEFAULTTONEAREST), &mi);
-        r = mi.rcMonitor;                                         /* (el monitor entero, con la barra de tareas) */
+            r = mi.rcMonitor;
+        }
+        int antes = g_sin_bordes;
         if (!g_sin_bordes) { g_estilo_viejo = estilo; GetWindowRect(v, &g_rect_viejo); }
         SetWindowLongA(v, GWL_STYLE, (estilo & ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX))
                                      | WS_POPUP | WS_VISIBLE);
         SetWindowPos(v, HWND_TOP, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        if (!g_sin_bordes) apuntar("  [mazino] opciones: pantalla completa SIN BORDES (%ld×%ld, monitor %d)",
-                                   r.right - r.left, r.bottom - r.top, k);
+        if (!antes || sb_mon != k)
+            apuntar("  [mazino] opciones: pantalla completa SIN BORDES (%ld×%ld, monitor %d)",
+                    r.right - r.left, r.bottom - r.top, k);
         g_sin_bordes = 1;
+        sb_mon = k;
     } else if (g_sin_bordes) {
         g_sin_bordes = 0;
-        SetWindowLongA(v, GWL_STYLE, g_estilo_viejo);
-        SetWindowPos(v, NULL, g_rect_viejo.left, g_rect_viejo.top, g_rect_viejo.right - g_rect_viejo.left,
-                     g_rect_viejo.bottom - g_rect_viejo.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
-        apuntar("  [mazino] opciones: de vuelta a modo ventana");
+        sb_mon = 0;
+        LONG est = g_estilo_viejo ? g_estilo_viejo
+                                  : (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE);
+        SetWindowLongA(v, GWL_STYLE, est);
+        if (g_rect_viejo.right > g_rect_viejo.left && g_rect_viejo.bottom > g_rect_viejo.top)
+            SetWindowPos(v, NULL, g_rect_viejo.left, g_rect_viejo.top, g_rect_viejo.right - g_rect_viejo.left,
+                         g_rect_viejo.bottom - g_rect_viejo.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
+        else
+            SetWindowPos(v, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW);
+        /* ★ (24-nov, 21:53 medido) la ventana va al tamaño del BACKBUFFER de ahora (g_e2d_w×g_e2d_h, ya con el Reset
+         *   a la resolución de ventana hecho), no a g_res_w×g_res_h: ése se confirma ~1 s después del cambio en vivo y
+         *   todavía era el de la pantalla completa (1920×1080) → la ventana quedaba del tamaño del monitor (1920×1071) con
+         *   la imagen chica estirada, hasta el próximo cambio de resolución. */
+        int vw = g_e2d_w >= 320 && g_e2d_h >= 200 ? g_e2d_w : g_res_w;
+        int vh = g_e2d_w >= 320 && g_e2d_h >= 200 ? g_e2d_h : g_res_h;
+        if (vw >= 320 && vh >= 200) pan_vivo_ventana(vw, vh);
+        apuntar("  [mazino] opciones: de vuelta a modo ventana (monitor %d, ventana %d×%d)", g_pantalla_monitor, vw, vh);
     }
 }
 /* (en el hilo del juego) lo pedido; y si el juego le devolvió los bordes a su ventana, se los saca otra vez */
@@ -603,10 +623,15 @@ static void opc_al_arrancar(void)
     OPC o;
     const char *origen = opc_leer(&o);
     int nw, nh;
-    if (o.completa && !g_medir5 && mon_nativa(o.monitor, &nw, &nh)) {   /* ★ (Punto 6) pantalla completa = la nativa */
-        g_res_w = nw;
-        g_res_h = nh;
-        apuntar("  [mazino] opciones: pantalla completa → la resolución nativa del monitor %d: %d×%d", o.monitor, nw, nh);
+    if (o.completa && !g_medir5 && mon_nativa(o.monitor, &nw, &nh)) {   /* ★ (24-nov) pantalla completa: tope proporcional */
+        int bw = nw, bh = nh;
+        if (pan_limitar_res(nw, nh, g_pan_tope_w, g_pan_tope_h, &bw, &bh))
+            apuntar("  [mazino] opciones: pantalla completa monitor %d (%d×%d) → backbuffer limitado a %d×%d (tope %d×%d)",
+                    o.monitor, nw, nh, bw, bh, g_pan_tope_w, g_pan_tope_h);
+        else
+            apuntar("  [mazino] opciones: pantalla completa → la resolución nativa del monitor %d: %d×%d", o.monitor, bw, bh);
+        g_res_w = bw;
+        g_res_h = bh;
     }
     int ok = opc_al_cfg(&o);                 /* (también con EDA-opciones.json: así «windowed» queda en 1) */
     apuntar("  [mazino] opciones: %s → autoexec.cfg %s (%s, monitor %d)", origen, ok ? "puesto" : "⚠ no se pudo escribir",
@@ -928,14 +953,12 @@ static void opc_poner_real(OPC *o)
     if (n) apuntar("  [mazino] opciones: %d valores leídos del juego (música %d · efectos %d)", n, o->musica, o->efectos);
 }
 static int g_seccion, g_nmon = 1;
-/* ★ (Punto 6, 20-nov) Options → Pantalla:
- *   · Ventana: las resoluciones que ENTRAN en el monitor elegido (el área de trabajo, con la barra de título y los
- *     bordes de la ventana): de 800×600 a 4K. En un monitor de 1080 la ventana más grande es 1600×900.
- *   · Pantalla completa: la ventana sin bordes tapa el monitor y el backbuffer es su resolución NATIVA (la del
- *     escritorio, que no se toca): sin selector.
- *   · La adaptación 2D ya no es una opción: va siempre (eda_escala2d.c). Todo cambio es en vivo. */
-static const int PAN_CAND[][2] = {{800, 600}, {1024, 768}, {1280, 720}, {1366, 768}, {1600, 900}, {1920, 1080},
-                                  {2560, 1440}, {3840, 2160}};
+/* ★ (24-nov, pantalla segura) Options → Pantalla:
+ *   · Ventana: de 800×600 a 1920×1080 (sin 2560×1440 ni 4K), las que entren en el monitor y en [pantalla] tope=.
+ *   · Pantalla completa: la ventana sin bordes tapa el monitor entero, y el backbuffer se limita a lo más grande que
+ *     entre en el tope (por defecto 1920×1080) manteniendo la proporción del monitor (Present estira al área cliente).
+ *   · La adaptación 2D va siempre (eda_escala2d.c). */
+static const int PAN_CAND[][2] = {{800, 600}, {1024, 768}, {1280, 720}, {1366, 768}, {1600, 900}, {1920, 1080}};
 #define PAN_NCAND ((int)(sizeof(PAN_CAND) / sizeof(PAN_CAND[0])))
 static int PAN_W[8], PAN_H[8], g_pan_n;                     /* (la lista del monitor elegido) */
 static int g_pan_res, g_pan_e2d = 1, g_pan_res0, g_pan_e2d0 = 1; /* (lo elegido / lo guardado al abrir) */
@@ -947,12 +970,15 @@ static void pan_lista(int monitor)
     int fw = (r.right - r.left) - 800, fh = (r.bottom - r.top) - 600;
     g_pan_n = 0;
     if (!mon_info(monitor, &e, &t)) { t.left = t.top = 0; t.right = 1920; t.bottom = 1040; }
-    for (int i = 0; i < PAN_NCAND && g_pan_n < 8; i++)
-        if (i == 0 || pan_cabe(PAN_CAND[i][0], PAN_CAND[i][1], fw, fh, t.right - t.left, t.bottom - t.top)) {
-            PAN_W[g_pan_n] = PAN_CAND[i][0];
-            PAN_H[g_pan_n] = PAN_CAND[i][1];
+    for (int i = 0; i < PAN_NCAND && g_pan_n < 8; i++) {
+        int cw = PAN_CAND[i][0], ch = PAN_CAND[i][1];
+        if (i > 0 && g_pan_tope_w > 0 && (cw > g_pan_tope_w || ch > g_pan_tope_h)) continue;
+        if (i == 0 || pan_cabe(cw, ch, fw, fh, t.right - t.left, t.bottom - t.top)) {
+            PAN_W[g_pan_n] = cw;
+            PAN_H[g_pan_n] = ch;
             g_pan_n++;
         }
+    }
 }
 static int pan_indice(int w, int h)
 {
@@ -967,10 +993,14 @@ static int pan_indice_cerca(int w, int h)                    /* la de la lista, 
     for (int i = 0; i < g_pan_n; i++) if (PAN_W[i] <= w && PAN_H[i] <= h) k = i;
     return k;
 }
-/* lo que quedaría andando con lo elegido: pantalla completa = la nativa del monitor; ventana = la de la lista */
+/* lo que quedaría andando con lo elegido: pantalla completa = nativa limitada por tope; ventana = la de la lista */
 static void pan_objetivo(int completa, int monitor, int res, int *w, int *h)
 {
-    if (completa && mon_nativa(monitor, w, h)) return;
+    int mw = 0, mh = 0;
+    if (completa && mon_nativa(monitor, &mw, &mh)) {
+        pan_limitar_res(mw, mh, g_pan_tope_w, g_pan_tope_h, w, h);
+        return;
+    }
     if (res < 0 || res >= g_pan_n) res = 0;
     *w = PAN_W[res];
     *h = PAN_H[res];
@@ -1069,13 +1099,21 @@ static void pan_motor_tamano(BYTE *o, int w, int h)
     DWORD t = GetTickCount();
     if (run) run("RestartRender");                       /* (el envoltorio: Reset con screenwidth / screenheight) */
     BYTE *pp = leer_ptr(o + 0x468);
-    apuntar("  [mazino] pantalla en vivo · RestartRender volvió en %lu ms · parámetros %d×%d", GetTickCount() - t,
-            pp ? *(int *)pp : 0, pp ? *(int *)(pp + 4) : 0);
-    *(int *)(o + 0x470) = h;
-    *(int *)(o + 0x334) = h;
-    *(int *)(o + 0x46C) = w;
-    *(int *)(o + 0x330) = w;
-    ((R_ORTO)0x0077B4F0)(o, w, h);                       /* (la ortográfica de la interfaz, con el tamaño nuevo) */
+    int aw = w, ah = h;
+    if (g_gr_bueno_w >= 320 && g_gr_bueno_h >= 200 && (g_gr_bueno_w != w || g_gr_bueno_h != h)) {
+        aw = g_gr_bueno_w;                               /* ★ Plan B volvió al último tamaño bueno: el motor queda ahí */
+        ah = g_gr_bueno_h;
+    }
+    apuntar("  [mazino] pantalla en vivo · RestartRender volvió en %lu ms · parámetros %d×%d · real %d×%d", GetTickCount() - t,
+            pp ? *(int *)pp : 0, pp ? *(int *)(pp + 4) : 0, aw, ah);
+    *(int *)(o + 0x470) = ah;
+    *(int *)(o + 0x334) = ah;
+    *(int *)(o + 0x46C) = aw;
+    *(int *)(o + 0x330) = aw;
+    ((R_ORTO)0x0077B4F0)(o, aw, ah);                     /* (la ortográfica de la interfaz, con el tamaño real) */
+    /* ★ (24-nov) si lo pedido es VENTANA y ya no está sin bordes, la ventana al tamaño real (por si el paso de pantalla
+     *   completa a ventana corrió antes que este Reset y la dejó con el tamaño de la pantalla completa) */
+    if (!g_op.completa && !g_sin_bordes) pan_vivo_ventana(aw, ah);
 }
 static void pan_motor_anotar(const char *cuando, BYTE *o)
 {
@@ -1180,22 +1218,34 @@ static void pan_vivo_revertir(BYTE *o, const char *motivo)
     g_pan_vivo_w = g_pan_vivo_h = 0;
     pan_intento(0);
 }
-static int pan_tras_stage_ok(void) { return g_ini[0] && GetPrivateProfileIntA("pantalla", "en_vivo_tras_stage", 0, g_ini) != 0; }
+static int rec_tras_stage_seguro(char *motivo, int cap);  /* (eda_d3d9.c: red de seguridad POOL_DEFAULT) */
+static int pan_tras_stage_ok(void) { return !g_ini[0] || GetPrivateProfileIntA("pantalla", "en_vivo_tras_stage", 1, g_ini) != 0; }
 static void pan_intento(int si)                          /* (ver e2d_tras_stage_al_arrancar) */
 {
     if (g_ini[0] && g_e2d_stages > 0) WritePrivateProfileStringA("pantalla", "vivo_tras_stage_intento", si ? "1" : "0", g_ini);
 }
-static int pan_bloqueado_stage(void) { return e2d_vivo_bloqueado(pan_tras_stage_ok()); }
+static int pan_bloqueado_stage(void)
+{
+    if (e2d_vivo_bloqueado(pan_tras_stage_ok())) return 1;
+    if (g_e2d_stages > 0 && !rec_tras_stage_seguro(NULL, 0)) return 1;
+    return 0;
+}
 static void pan_vivo_tras_stage(int w, int h, const char *que)    /* (ver e2d_vivo_bloqueado: queda para el reinicio) */
 {
-    apuntar("  [mazino] pantalla en vivo · ⛔ %s %d×%d NO se aplica en vivo: ya se entró a %d Stage(s) y el Reset fallaría "
-            "(0x8876086C → el motor rehace el dispositivo y se cae). Queda para el próximo reinicio.", que, w, h, g_e2d_stages);
+    char mot[240];
+    mot[0] = 0;
+    if (pan_tras_stage_ok() && !rec_tras_stage_seguro(mot, (int)sizeof(mot)) && mot[0])
+        apuntar("  [mazino] pantalla en vivo · ⛔ %s %d×%d NO se aplica en vivo tras %d Stage(s) (red de seguridad: %s). "
+                "Queda para el próximo reinicio.", que, w, h, g_e2d_stages, mot);
+    else
+        apuntar("  [mazino] pantalla en vivo · ⛔ %s %d×%d NO se aplica en vivo: ya se entró a %d Stage(s) y [pantalla] "
+                "en_vivo_tras_stage=0. Queda para el próximo reinicio.", que, w, h, g_e2d_stages);
     WCHAR r[MAX_PATH];
     char v[32];
     wsprintfA(v, "%dx%d", w, h);
     if (ruta_juego(r, L"eda_reiniciar.txt")) escribir_archivo(r, v, (DWORD)lstrlenA(v));
     WCHAR t[200];
-    wsprintfW(t, L"Después de un Stage el cambio en vivo puede cerrar EDA: se aplica al reiniciar (Exit Game).");
+    wsprintfW(t, L"Después de un Stage el cambio en vivo no se aplicó por seguridad: queda para al reiniciar (Exit Game).");
     pan_vivo_estado(t, ORO);
     g_pan_vivo_esperando = 0;
     g_pan_vivo_w = g_pan_vivo_h = 0;
@@ -1281,6 +1331,7 @@ static void pan_vivo_tick(void)                          /* (hilo del juego, des
     g_pv.t_visto = 0;
     g_pv.visto = 0;
     pan_motor_anotar("antes", o);
+    InterlockedExchange(&g_gr_rehacer, 0);               /* ★ (24-nov) este RestartRender ya aplica el antialias nuevo */
     pan_intento(1);                                      /* ★ (20-nov) si esto cierra EDA, la próxima vez: protección */
     g_pan_vivo_desde = GetTickCount();
     e2d_viejo_agregar(g_pv.w0, g_pv.h0);                 /* (la cámara de las escenas ya creadas queda con éste) */
@@ -1444,11 +1495,13 @@ static void dibujar_seccion(HDC d, int x, int y, int derecha)
                 selector(d, sx, y, w, 2, vals + por_fila, ptr + por_fila, g_pan_n - por_fila, g_pan_res);
             }
         } else {
-            int w = 0, h = 0;
-            WCHAR t[96];
-            mon_nativa(g_op.monitor, &w, &h);
+            int mw = 0, mh = 0, bw = 0, bh = 0;
+            WCHAR t[112];
+            mon_nativa(g_op.monitor, &mw, &mh);
+            int rec = pan_limitar_res(mw, mh, g_pan_tope_w, g_pan_tope_h, &bw, &bh);
             int sx = fila_etiqueta(d, x, y + 5, L"Resolución", TEXTO, F_NORMAL);
-            wsprintfW(t, L"%d×%d · la nativa del monitor (automática)", w, h);
+            if (rec) wsprintfW(t, L"%d×%d (monitor %d×%d · tope %d×%d)", bw, bh, mw, mh, g_pan_tope_w, g_pan_tope_h);
+            else wsprintfW(t, L"%d×%d · la nativa del monitor (automática)", bw, bh);
             texto(d, sx, y + 5, t, CIAN_BRILLO, F_BOLD, 0);
         }
         y += 26 + 5 + 5;
@@ -1812,18 +1865,18 @@ static void opc_avisar_posicion(const char *quien)
         if (g_diagnostico) apuntar("  (diag) %s cerrado: el mouse está fuera del juego (%ld, %ld): no se toca", quien, p.x, p.y);
         return;
     }
-    /* ★ (16-nov) EN LAS COORDENADAS DEL JUEGO. Medido 03:38–03:44: en pantalla completa se mandaba (960, 540) de
-     *   1920×1080 y el juego lo toma en SU pantalla de 800×600 (lo recorta a 799): el cursor aparecía en el borde
-     *   derecho. En ventana coincidían (800×600), por eso ahí andaba. */
+    /* ★ (24-nov) con escala2d / estirado de ventana (e2d_raton), mi_peek ya convierte cliente → backbuffer → 800×600:
+     *   mandar el punto cliente real sin pre-escalar ni saltar el cursor de Windows (evita doble escala en 1440p/4K). */
+    if (e2d_raton()) {
+        PostMessageA(g_ventana_juego, WM_MOUSEMOVE, 0, MAKELPARAM(p.x, p.y));
+        if (g_diagnostico) apuntar("  (diag) %s cerrado: mouse cliente (%ld, %ld) de %ldx%ld → a mi_peek (backbuffer %dx%d)",
+                                   quien, p.x, p.y, r.right, r.bottom, g_e2d_w, g_e2d_h);
+        return;
+    }
+    /* ★ (16-nov) EN LAS COORDENADAS DEL JUEGO (sin escala2d). */
     int w = 800, hh = 600;
     pantalla_del_juego(&w, &hh);
     int gx = p.x * w / r.right, gy = p.y * hh / r.bottom;
-    /* ★ (16-nov) Y EL CURSOR DE WINDOWS TAMBIÉN. Medido 13:35:05: se mandó (409, 282) y 0,7 s después el juego
-     *   tenía (799, 508): el juego toma la posición de Windows de la ventana TAL CUAL como suya (800×600, sin
-     *   escalar; lo de más de 800 lo recorta a 799 — clic: Windows (1145, 513) → juego (799, 513)). Jugando, él
-     *   mismo mantiene el cursor de Windows dentro de ese 800×600 (SetPhysicalCursorPos); con Options abierta eso
-     *   está frenado y el mouse anda por los 1920. Al cerrar, el cursor de Windows vuelve al punto que el juego
-     *   espera (el mismo lugar en la imagen estirada): su próximo movimiento ya no lo manda al borde. Una vez. */
     if (r.right != w || r.bottom != hh) {
         POINT s = {gx, gy};
         if (ClientToScreen(g_ventana_juego, &s)) SetCursorPos(s.x, s.y);
@@ -1947,6 +2000,7 @@ static LRESULT CALLBACK opc_proc(HWND v, UINT m, WPARAM w, LPARAM l)
                     lstrcpyW(g_estado, L"No se pudo guardar la resolución en eda_d3d9.ini.");
                     g_estado_color = ROJO_LUZ;
                 } else if (pan_cambio && g_pan_vivo_w) {
+                    InterlockedExchange(&g_gr_rehacer, 0);         /* (un solo RestartRender aplica resolución y AA) */
                     lstrcpyW(g_estado, L"Guardado. Aplicando la resolución en vivo…");
                     g_estado_color = ORO;
                 } else if (g_gr_rehacer) {

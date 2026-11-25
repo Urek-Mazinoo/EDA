@@ -56,9 +56,11 @@ mejoras=1
 [pantalla]
 ; ★ EXPERIMENTAL (Punto 5): la interfaz de 2009 (800×600) escalada y centrada en una pantalla más grande, con el
 ;   3D del Stage a resolución nativa. 0 = como siempre (800×600). Con 1, «resolucion» dice el tamaño (p. ej.
-;   1920x1080); escala2d_stage=0 deja el HUD del Stage como hoy (arriba a la izquierda)
+;   1920x1080); escala2d_stage=0 deja el HUD del Stage como hoy (arriba a la izquierda).
+;   «tope» limita el backbuffer (en pantalla completa mantiene la proporción del monitor; 0 = sin tope, bajo tu riesgo).
 escala2d=0
 resolucion=
+tope=1920x1080
 escala2d_stage=1
 ; 1 = las franjas de los costados con la imagen del juego desenfocada y oscura; 0 = negras (como antes)
 ambiente=1

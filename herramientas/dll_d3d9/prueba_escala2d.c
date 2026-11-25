@@ -59,7 +59,7 @@ static void apuntar(const char *fmt, ...) { (void)fmt; g_apuntes++; }
 static BYTE *g_escena_vt;                                  /* la escena «actual» de mentira */
 static int g_mira_juego, g_inactiva;
 static POINT g_cur_fisico;
-static BOOL __attribute__((stdcall)) cursor_falso(POINT *p) { *p = g_cur_fisico; return 1; }                        /* [0x917884] y [0x90DE80] de mentira */
+static BOOL WINAPI cursor_falso(POINT *p) { *p = g_cur_fisico; return 1; }                        /* [0x917884] y [0x90DE80] de mentira */
 static BYTE *leer_ptr(const void *p)
 {
     if ((ULONG_PTR)p == 0x917884) return (BYTE *)(ULONG_PTR)g_mira_juego;
@@ -498,6 +498,117 @@ int main(void)
         chequear("(2) si la sesión anterior se cerró en el intento → protección (0)", e2d_tras_stage_al_arrancar(1, 1) == 0);
         chequear("(2) con la protección elegida a mano sigue la protección", e2d_tras_stage_al_arrancar(0, 0) == 0);
         g_e2d_fase_v = fv; g_e2d_stages = st;
+    }
+    printf("== (24-nov) pantalla segura: tope en .ini y mouse cliente ↔ backbuffer ↔ interfaz ==\n");
+    {
+        g_ini_n = 0;
+        WritePrivateProfileStringA("pantalla", "resolucion", "2560x1440", "x");
+        g_res_w = 800; g_res_h = 600; g_medir5 = 0;
+        e2d_leer_ini("x");
+        chequear("resolucion=2560x1440 guardada en .ini → limitada a 1920×1080", g_res_w == 1920 && g_res_h == 1080 && g_e2d_ini_w == 1920 && g_e2d_ini_h == 1080);
+        WritePrivateProfileStringA("pantalla", "resolucion", "3840x2160", "x");
+        g_res_w = 800; g_res_h = 600;
+        e2d_leer_ini("x");
+        chequear("resolucion=3840x2160 guardada en .ini → limitada a 1920×1080", g_res_w == 1920 && g_res_h == 1080);
+        WritePrivateProfileStringA("pantalla", "tope", "0", "x");
+        g_res_w = 800; g_res_h = 600;
+        e2d_leer_ini("x");
+        chequear("tope=0 en .ini → 3840×2160 permitida", g_res_w == 3840 && g_res_h == 2160);
+        WritePrivateProfileStringA("pantalla", "tope", "1920x1080", "x");
+
+        /* Mouse ida y vuelta con ventana sin bordes > backbuffer (1440p, 4K, ultrawide 3440×1440 → 1920×804) */
+        static const int CASOS[3][4] = {{2560, 1440, 1920, 1080}, {3840, 2160, 1920, 1080}, {3440, 1440, 1920, 804}};
+        for (int k = 0; k < 3; k++) {
+            g_cli_w = CASOS[k][0]; g_cli_h = CASOS[k][1];
+            e2d_tamano(CASOS[k][2], CASOS[k][3], "prueba_tope");
+            int bien = 1, bordes[5][2] = {{0, 0}, {799, 0}, {0, 599}, {799, 599}, {400, 300}};
+            for (int b = 0; b < 5; b++) {
+                int ux = bordes[b][0], uy = bordes[b][1];
+                int cx = ux, cy = uy;
+                e2d_ui_a_ventana((HWND)1, &cx, &cy);
+                MSG mv = {(HWND)1, WM_MOUSEMOVE, 0, MAKELPARAM(cx, cy)};
+                e2d_mouse(&mv);
+                if (abs((short)LOWORD(mv.lParam) - ux) > 1 || abs((short)HIWORD(mv.lParam) - uy) > 1) bien = 0;
+            }
+            chequear(k == 0 ? "mouse 1440p (backbuffer 1920×1080) bordes y centro ida/vuelta"
+                     : k == 1 ? "mouse 4K (backbuffer 1920×1080) bordes y centro ida/vuelta"
+                              : "mouse ultrawide 3440×1440 (backbuffer 1920×804) bordes y centro ida/vuelta", bien);
+        }
+        g_cli_w = 1920; g_cli_h = 1080;
+    }
+    printf("== (24-nov) cámara del personaje (0x5BB9D0) y viewport tras cambios EN VIVO ==\n");
+    {
+        float rad2 = 3.14159265f / 180.0f;
+        float mp[16], mg[16];
+        g_e2d = 1;
+        g_e2d_propio = 0;
+        g_e2d_rt_fuera = 0;
+        g_e2d_stage_ahora = 0;
+        g_e2d_viejos_n = 0;
+        /* Caso 1: lobby creado a 800×600 (4:3, FovY 52,5°), cambiado en vivo a 1920×1080 (16:9) */
+        e2d_tamano(800, 600, "lobby0");
+        e2d_viejo_agregar(800, 600);
+        e2d_tamano(1920, 1080, "vivo_1920");
+        DWORD vp_800[6] = {0, 0, 800, 600, 0, 0x3F800000};
+        ((E2D_VP)vt[47])(dev, vp_800);
+        perspectiva(mp, 70.0f * rad2, 70.0f * rad2 * 600.0f / 800.0f);   /* 52,5° de cuando se creó a 800×600 */
+        ((E2D_ST)vt[44])(dev, 3, mp);
+        float fy1 = 2.0f * atanf(1.0f / d_proj[5]) / rad2;
+        chequear("lobby 800×600 → 1920×1080 en vivo: FovY sigue 52,5° (no 70°), k = 1,00",
+                 cerca(fy1, 52.5f, 0.05f) && cerca(g_e2d_k, 1.0f, 0.01f) && d_proj[0] == mp[0]);
+        chequear("lobby 800×600 → 1920×1080 en vivo: viewport viejo (0,0) 800×600 → R (240,0,1440×1080)",
+                 d_vp[0] == 240 && d_vp[1] == 0 && d_vp[2] == 1440 && d_vp[3] == 1080);
+
+        /* Caso 2: lobby creado a 1920×1080 (16:9, FovY 39,375°), cambiado en vivo a 1024×768 (4:3) */
+        e2d_viejo_agregar(1920, 1080);
+        e2d_tamano(1024, 768, "vivo_1024");
+        DWORD vp_1920[6] = {0, 0, 1920, 1080, 0, 0x3F800000};
+        ((E2D_VP)vt[47])(dev, vp_1920);
+        perspectiva(mp, 70.0f * rad2, 70.0f * rad2 * 1080.0f / 1920.0f); /* 39,375° de cuando se creó a 1920×1080 */
+        ((E2D_ST)vt[44])(dev, 3, mp);
+        float fy2 = 2.0f * atanf(1.0f / d_proj[5]) / rad2;
+        chequear("lobby 1920×1080 → 1024×768 en vivo: FovY pasa a 52,5° (no 39,4°), viewport 1024×768",
+                 cerca(fy2, 52.5f, 0.05f) && d_vp[0] == 0 && d_vp[1] == 0 && d_vp[2] == 1024 && d_vp[3] == 768);
+
+        /* Caso 3: lobby creado a 1920×1080 (16:9), cambiado en vivo a 800×600 (g_e2d_activa == 0) */
+        e2d_viejo_agregar(1024, 768);
+        e2d_tamano(800, 600, "vivo_800");
+        ((E2D_ST)vt[44])(dev, 3, mp);
+        float fy3 = 2.0f * atanf(1.0f / d_proj[5]) / rad2;
+        ((E2D_GT)vt[45])(dev, 3, mg);
+        chequear("lobby 1920×1080 → 800×600 en vivo: FovY vuelve a 52,5° y GetTransform devuelve la del juego",
+                 !g_e2d_activa && cerca(fy3, 52.5f, 0.05f) && !memcmp(mg, mp, sizeof(mp)));
+
+        /* Caso 4: Stage creado a 1920×1080 (16:9), cambiado en vivo a 800×600 (4:3) */
+        g_e2d_stage_ahora = 1;
+        ((E2D_ST)vt[44])(dev, 3, mp);
+        float fy4 = 2.0f * atanf(1.0f / d_proj[5]) / rad2;
+        chequear("Stage 1920×1080 → 800×600 en vivo: aspecto 3D se corrige a 52,5° (4:3)",
+                 cerca(fy4, 52.5f, 0.05f));
+        /* Una sombra cuadrada (90°×90°) en render target fuera de pantalla no se toca */
+        g_e2d_rt_fuera = 1;
+        float msom[16];
+        perspectiva(msom, 90.0f * rad2, 90.0f * rad2);
+        ((E2D_ST)vt[44])(dev, 3, msom);
+        chequear("proyección cuadrada de sombra en render target fuera de pantalla no se toca",
+                 !memcmp(d_proj, msom, sizeof(msom)));
+        DWORD vp_cap[6] = {0, 0, 1024, 1024, 0, 0x3F800000};
+        ((E2D_VP)vt[47])(dev, vp_cap);
+        chequear("viewport 1024×1024 de Capítulos en render target no se recorta a 800×600",
+                 d_vp[2] == 1024 && d_vp[3] == 1024);
+
+        /* Caso 5: viewport sobredimensionado en pantalla (no RT) se recorta al backbuffer actual */
+        g_e2d_rt_fuera = 0;
+        g_e2d_viejos_n = 0;
+        ((E2D_VP)vt[47])(dev, vp_1920);
+        chequear("viewport (0,0) 1920×1080 en backbuffer 800×600 (sin RT) → recortado a 800×600",
+                 d_vp[2] == 800 && d_vp[3] == 600);
+
+        /* Caso 6: más de 6 resoluciones viejas registradas (hasta 32) */
+        for (int k = 0; k < 10; k++) e2d_viejo_agregar(800 + k * 64, 600 + k * 36);
+        chequear("tabla g_e2d_viejos guarda más de 6 resoluciones (10 registradas)", g_e2d_viejos_n == 10);
+        g_e2d_stage_ahora = 0;
+        g_e2d_viejos_n = 0;
     }
     printf("== (24-nov) LAS PANTALLAS PANORÁMICAS: el lienzo por escena y cada resolución ==\n");
     {

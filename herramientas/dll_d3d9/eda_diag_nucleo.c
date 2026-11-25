@@ -128,6 +128,19 @@ static int dg_evento(char *out, int cap, unsigned long long t, unsigned long lon
     return n > 0 && n < cap ? n : 0;
 }
 
+/* ★ (24-nov) los campos extra del evento «pantalla» (CreateDevice y Reset): sólo números y tokens fijos */
+static int dg_pantalla_extra(char *out, int cap, const char *origen, int w, int h, int completa,
+                             int mon_w, int mon_h, int aa, const char *perfil, unsigned long hr, const char *plan_b)
+{
+    int n = snprintf(out, (size_t)cap,
+                     ",\"origen\":\"%s\",\"w\":%d,\"h\":%d,\"modo\":\"%s\",\"mon_w\":%d,\"mon_h\":%d,"
+                     "\"aa\":%d,\"perfil\":\"%s\",\"hr\":\"0x%08lX\",\"plan_b\":\"%s\"",
+                     origen && origen[0] ? origen : "?", w, h, completa ? "completa" : "ventana",
+                     mon_w, mon_h, aa, perfil && perfil[0] ? perfil : "?", hr,
+                     plan_b && plan_b[0] ? plan_b : "ninguno");
+    return n > 0 && n < cap ? n : 0;
+}
+
 /* ── la COLA: el hilo del juego (o un gancho, o el vigía) anota y sigue; el hilo del diagnóstico saca en orden ───────
  * Un anillo de líneas con un candado de INTENTO: anotar copia ≤ 240 bytes adentro; si el candado está tomado más de
  * unas vueltas, o la cola está llena (el lector se atrasó), la línea se DESCARTA y se cuenta. Nadie espera de verdad. */

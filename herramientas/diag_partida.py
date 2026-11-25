@@ -200,8 +200,15 @@ def leer_diag(archivos):
                 continue
             vistos.add(clave)
             t = datetime.fromtimestamp((ev.get("t", 0) + ev.get("dr", 0)) / 1000.0, UTC)
-            resto = " ".join("%s=%s" % (k, v) for k, v in ev.items() if k not in ("t", "e", "r", "dr", "m"))
-            r.setdefault(cuenta, []).append(Linea(t, "%s/diag·%s" % (cuenta, sesion[:6]), ("%s %s" % (ev.get("e"), resto)).strip()))
+            if ev.get("e") == "pantalla":
+                txt = "pantalla %s %sx%s %s mon=%sx%s aa=%s perfil=%s hr=%s plan_b=%s" % (
+                    ev.get("origen", "?"), ev.get("w", "?"), ev.get("h", "?"), ev.get("modo", "?"),
+                    ev.get("mon_w", "?"), ev.get("mon_h", "?"), ev.get("aa", "?"), ev.get("perfil", "?"),
+                    ev.get("hr", "?"), ev.get("plan_b", "ninguno"))
+            else:
+                resto = " ".join("%s=%s" % (k, v) for k, v in ev.items() if k not in ("t", "e", "r", "dr", "m"))
+                txt = ("%s %s" % (ev.get("e"), resto)).strip()
+            r.setdefault(cuenta, []).append(Linea(t, "%s/diag·%s" % (cuenta, sesion[:6]), txt))
     for v in r.values():
         v.sort(key=lambda ln: ln.t)
     return r
@@ -462,6 +469,9 @@ def armar(paquete, partida_id=None, desde=None, hasta=None, clientes=(), zona=-5
             if ev in ("caida", "atrapado", "congelado", "perdidos"):      # (los que manda eda_diag.c)
                 an.append("%s #%s (%s), su cliente: %s (%s)" % ("⛔" if ev in ("caida", "atrapado") else "⚠", n,
                                                                miembros.get(n, "?"), ln.texto, hh(ln.t)))
+            elif ev == "pantalla" and ("hr=0x00000000" not in ln.texto or "plan_b=ninguno" not in ln.texto):
+                an.append("%s #%s (%s), su cliente: %s (%s)" % ("⛔" if "hr=0x00000000" not in ln.texto else "⚠", n,
+                                                               miembros.get(n, "?"), ln.texto, hh(ln.t)))
     nombre = elegidas[0]["id"] if len(elegidas) == 1 else "intervalo-%s" % desde_.strftime("%Y%m%d-%H%M%S")
 
     res = ["# Diagnóstico de %s" % nombre, "",
@@ -665,6 +675,7 @@ partida P-20261121-165648-s3: #1 terminó su stage · siguen en la stage: #2
     chequear("por intervalo horario: toma la partida que empezó adentro", "P?-20261121-180000" in res)
     control_grupos(d, chequear)
     control_reinicio(d, chequear)
+    control_pantalla(d, chequear)
     print("\n%s" % ("→ TODO BIEN" if all(ok) else "→ ⛔ ALGO FALLA"))
     return 0 if all(ok) else 1
 
@@ -778,6 +789,42 @@ partida P-20261122-001531-s1 empieza: sala 1 · #1=r2b_777001
              "DURANTE la carga" not in res)
     chequear("★ el revés: jugando SOLO, que no haya «estoy vivo» en la stage no es una anomalía",
              "estoy vivo" not in res.split("## Anomalías")[1].split("##")[0])
+
+
+def control_pantalla(d, chequear):
+    """★ (24-nov) el evento «pantalla» entra a la línea de tiempo con todos sus datos; sólo salta anomalía si falló o usó plan B."""
+    c = os.path.join(d, "pantalla")
+    os.makedirs(os.path.join(c, "diag"), exist_ok=True)
+    server = """2026-11-24 12:00:00 #1 conectó 198.51.100.1:1
+#1 es la cuenta en_55
+2026-11-24 12:00:10 #1 ← 104e (0 B)
+partida P-20261124-120010-s1 empieza: sala 1 · #1=en_55
+2026-11-24 12:00:10 #1 → 104f (140 B)
+2026-11-24 12:00:12 #1 → 105e (4 B)
+2026-11-24 12:00:40 #1 ← 1064 (1 B)
+2026-11-24 12:00:40 #1 → 1073 (60 B)
+"""
+    open(os.path.join(c, "server.log"), "w", encoding="utf-8").write(server)
+    t0 = int(fecha("2026-11-24 12:00:05").timestamp() * 1000)
+    ev_ok = {"t": t0, "m": 500, "e": "pantalla", "origen": "crear", "w": 1920, "h": 1080, "modo": "completa",
+             "mon_w": 2560, "mon_h": 1440, "aa": 2, "perfil": "alto", "hr": "0x00000000", "plan_b": "ninguno", "dr": 0}
+    ev_pb = {"t": t0 + 2000, "m": 2500, "e": "pantalla", "origen": "reset", "w": 1280, "h": 720, "modo": "ventana",
+             "mon_w": 2560, "mon_h": 1440, "aa": 0, "perfil": "alto", "hr": "0x00000000", "plan_b": "sin_aa", "dr": 0}
+    with open(os.path.join(c, "diag", "55-" + "ef" * 16 + ".jsonl"), "w", encoding="utf-8") as f:
+        f.write(json.dumps(ev_ok) + "\n")
+    z1, res1 = armar(c, partida_id="P-20261124-120010-s1", salida=os.path.join(d, "pan1.zip"))
+    lt1 = zipfile.ZipFile(z1).read("linea_de_tiempo.txt").decode()
+    chequear("pantalla: aparece en la línea de tiempo con resolución, modo, monitor, aa, perfil, hr y plan_b",
+             "pantalla crear 1920x1080 completa mon=2560x1440 aa=2 perfil=alto hr=0x00000000 plan_b=ninguno" in lt1, lt1[:400])
+    chequear("pantalla ★ el revés: un CreateDevice normal (hr=0, plan_b=ninguno) no levanta anomalía",
+             "Ninguna regla saltó." in res1)
+    with open(os.path.join(c, "diag", "55-" + "ef" * 16 + ".jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps(ev_pb) + "\n")
+    z2, res2 = armar(c, partida_id="P-20261124-120010-s1", salida=os.path.join(d, "pan2.zip"))
+    lt2 = zipfile.ZipFile(z2).read("linea_de_tiempo.txt").decode()
+    chequear("pantalla: un Reset con plan B entra en la línea de tiempo y en las anomalías",
+             "pantalla reset 1280x720 ventana mon=2560x1440 aa=0 perfil=alto hr=0x00000000 plan_b=sin_aa" in lt2
+             and "plan_b=sin_aa" in res2.split("## Anomalías")[1].split("##")[0])
 
 
 def main():

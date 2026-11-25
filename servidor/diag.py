@@ -14,7 +14,8 @@ otra cosa, y el ticket nunca viaja ni se guarda). Cada lote lleva:
     X-EDA-Firma   hex de HMAC-SHA256(K, «eda-diag-v1\ncuenta\nhora\nsesion\nlote\nsha256(cuerpo)»)
 Afuera va SÓLO por HTTPS (la dll no manda por http salvo a 127.0.0.1, para probar en la misma PC).
 El cuerpo: líneas JSON (≤ 64 KB, ≤ 500), cada una un evento chico: {"t": ms UTC, "m": ms desde el arranque, "e": "…", …}.
-Los eventos que manda la dll (herramientas/dll_d3d9/eda_diag.c): inicio (versión, build), escena (vtable), congelado
+Los eventos que manda la dll (herramientas/dll_d3d9/eda_diag.c): inicio (versión, build), pantalla (CreateDevice/Reset:
+backbuffer w/h, modo ventana/completa, monitor mon_w/mon_h, antialias, perfil, hr, plan_b), escena (vtable), congelado
 (≥ 2 s sin cuadros: ms, escena), atrapado (≥ 15 s y sigue), fps (cada ~30 s), foco (al frente o no), server_conecta
 (cuántas veces, sin dirección), caida (código, sitio, nombre del módulo sin ruta), perdidos (eventos descartados con la
 cola llena), fin (cierre normal; si falta, el juego no cerró bien).
