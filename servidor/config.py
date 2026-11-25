@@ -94,6 +94,11 @@ TICKET_HORAS = float(os.environ.get("EDA_TICKET_HORAS") or 12)
 #   (con los conectados de verdad, el cliente muestra [Open] / [Normal] / [Busy] / [Full])
 NOMBRE_SERVER = os.environ.get("EDA_NOMBRE_SERVER") or "EDA"
 MAX_JUGADORES = int(os.environ.get("EDA_MAX_JUGADORES") or 100)
+# ★ (24-nov) JUGADORES POR SALA (servidor/salas.py · maximo_sala; documentacion/MAS_JUGADORES.md). 0 = el de la stage,
+#   como en 2009 (data/scenariolist.xml: Fácil 3, Normal 5, Difícil 8; lo manda el cliente al crear). 1..8 = ese máximo
+#   para TODAS las salas (p. ej. 4 para jugar de a cuatro también en Fácil). El cliente está hecho para 8 (8 filas en
+#   la sala, 8 compañeros en el HUD, 8 «Player Start» por mapa).
+JUGADORES_SALA = max(0, min(8, int(os.environ.get("EDA_JUGADORES_SALA") or 0)))
 
 # ★ «al menos por ahora, directo nivel 25» (El tester, 12-nov): el piso de nivel de cada personaje
 #   (servidor/cuentas.py · con_nivel_inicial). 0 = sin piso (las pruebas lo usan así)
@@ -103,6 +108,11 @@ NIVEL_INICIAL = int(os.environ.get("EDA_NIVEL_INICIAL") or 25)
 #   usar los comandos de GM en el chat (/oro, /monedas, /nivel, /item, /stats, /limpiar). Vacía por defecto = nadie es GM.
 GM_CUENTAS = os.environ.get("EDA_GM_CUENTAS", "")
 GM_EN_VIVO = os.environ.get("EDA_GM_EN_VIVO", "").strip() == "1"
+
+# ★ (24-nov) EXPERIMENTAL: el server árbitro del duelo PvP (servidor/duelo.py, documentacion/PVP_PROTOTIPO.md). Apagado
+#   por defecto: sin EDA_PVP=1 el server no mira los eventos PvP_* de la arena y el PvE queda exactamente igual.
+PVP = os.environ.get("EDA_PVP", "").strip() == "1"
+DUELOS = os.path.join(ESTADO, "duelos.jsonl")                 # cada duelo decidido: quién ganó, a quién, cómo
 
 # ★ (20-nov) LA PUERTA INTERNA DEL PANEL del Coordinador Eñeños (servidor/panel.py, el «contrato del panel v1»):
 #   R2_CUENTAS_FICHA_INTERNA es la ficha que tiene que traer cada pedido (la MISMA variable que el resto del conjunto
