@@ -9,7 +9,8 @@
    "resumen": "Pantalla más segura: el juego ya no se cierra al cambiar la resolución o la pantalla completa.",
    "corregidos": [
     "Pantalla: el juego ya no se cierra al cambiar la resolución o la pantalla completa.",
-    "Pantalla: ahora también se puede cambiar después de jugar una stage."
+    "Pantalla: ahora también se puede cambiar después de jugar una stage.",
+    "Pantalla: los ataques ya no se ven distorsionados («efecto agua») y el personaje del lobby mantiene su tamaño al cambiar la resolución."
    ],
    "mejoras": [
     "Pantalla completa en monitores grandes: imagen a 1920×1080, más fluida."
