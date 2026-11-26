@@ -332,6 +332,9 @@ def _sacar_de_sala(s, num, conexion):
         s["anfitrion"] = (en_stage or s["miembros"])[0]
         s.get("listos", set()).discard(s["anfitrion"])  # (el anfitrión no «está listo»: larga)
     nuevo = numero(s, s["anfitrion"])
+    from servidor.salida import registrar_sala
+    for n in s["miembros"]:
+        registrar_sala(s, n)
     r = [(0x1058, struct.pack("<BHB", yo, 3, nuevo), 0, n) for n in s["miembros"]]
     # ★ (22-nov) si el máster se fue o se desconectó en plena stage (ya largada), la stage SIGUE con el nuevo
     #   anfitrión (0x1058 tipo 3 prende +0x168 en su cliente) y desde ahí rige la guardia de stage trabada (90 s

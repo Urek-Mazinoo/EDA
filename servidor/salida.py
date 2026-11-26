@@ -15,25 +15,86 @@ Entonces: desde el 0x104F (empieza a cargar) hasta su 0x105E, a ese jugador no s
 """
 import time
 
-from servidor.estado import PARTIDAS
+from servidor.estado import PARTIDAS, SALAS, partida
 
 PELIGROSOS = range(0x1003, 0x100C)             # los que terminan el hilo de carga (0x5345C0)
 TOPE = 200                                      # mensajes guardados como mucho por jugador
 VENCE = 180.0                                   # s: si la carga no termina en esto, se sueltan igual
 
+# 1054 (expulsión) y 1058 (estado/máster) también pertenecen a la sala de espera.
+DE_SALA = {0x1054, 0x1058}
+DE_STAGE = DE_SALA | {0x105D, 0x1060, 0x1062, 0x106E, 0x106F, 0x1071, 0x1072, 0x1073, 0x1075}
+
+
+def registrar_sala(s, conexion):
+    """Recupera la visita de un miembro que ya estaba en una sala o stage al recargar."""
+    p = partida(conexion)
+    if "visita_salida" not in p:
+        en_stage = conexion in s.get("en_stage", ()) or p.get("cartas_hasta")
+        p["visita_salida"] = ("stage" if en_stage else "sala", object())
+
+
+# El estado vive entre recargas. Registrar las visitas existentes antes de que un manejador
+# quite miembros o cierre la partida para preparar los paquetes de despedida.
+for _sala in SALAS.values():
+    for _conexion in _sala["miembros"]:
+        registrar_sala(_sala, _conexion)
+
+
+def vincular(n, resp):
+    """Conserva la visita del destinatario cuando el envío queda pendiente."""
+    pendientes = []
+    for r in resp:
+        d = r[3] if len(r) > 3 else n
+        if r[0] in DE_STAGE and len(r) < 5:
+            visita = PARTIDAS.get(d, {}).get("visita_salida")
+            r = (*r[:3], d, visita)
+        pendientes.append(r)
+    return pendientes
+
+
+def sin_stage(n, resp, registrar):
+    """Si falla la guardia, conserva sólo las respuestas ajenas a la stage."""
+    seguros = []
+    for r in resp:
+        if r[0] in DE_STAGE:
+            registrar("#%s descarto %04x: falló la guardia" % (r[3] if len(r) > 3 else n, r[0]))
+        else:
+            seguros.append(r)
+    return seguros
+
 
 def ordenar(n_defecto, resp, ahora=None):
-    """resp = [(comando, cuerpo, ms de espera[, destino])] → lo que se manda YA, en orden (con su destino).
-    Los mensajes con espera no se tocan acá: se vuelven a pasar por acá cuando vence su espera."""
+    """Ordena respuestas (comando, cuerpo, espera[, destino[, visita]]) para el transporte.
+
+    Los paquetes diferidos de stage conservan la visita hasta que vence su espera.
+    La escena sigue viva durante las cartas aunque la sala ya haya cerrado el juego.
+    """
     ahora = time.monotonic() if ahora is None else ahora
     sale = []
     for r in resp:
         c, cuerpo, espera = r[0], r[1], r[2]
         d = r[3] if len(r) > 3 else n_defecto
+        if c == 0x104F and not espera:
+            partida(d)["visita_salida"] = ("stage", object())
+        p = PARTIDAS.get(d)
+        if c in DE_STAGE:
+            visita = (p or {}).get("visita_salida")
+            if visita is None or (len(r) > 4 and visita is not r[4]):
+                motivo = "salió o cambió de partida"
+            elif c not in DE_SALA and visita[0] != "stage":
+                motivo = "fuera de la stage"
+            else:
+                motivo = None
+            if motivo:
+                print("#%s descarto %04x: %s" % (d, c, motivo), flush=True)
+                continue
+            if espera:
+                sale.append((c, cuerpo, espera, d, visita))
+                continue
         if espera:
             sale.append((c, cuerpo, espera, d))
             continue
-        p = PARTIDAS.get(d)
         if p is None:
             sale.append((c, cuerpo, 0, d))
             continue
@@ -46,9 +107,14 @@ def ordenar(n_defecto, resp, ahora=None):
             g.append((c, cuerpo))
             continue
         sale.append((c, cuerpo, 0, d))
-        # 0x1075 también puede salir diferido desde game over, sin pasar
-        # como transición inmediata por juego._responder.
-        if c == 0x1075 and cuerpo[:2] == b"\1\0":
+        if (c == 0x1072 or (c in (0x101E, 0x1020, 0x104D) and cuerpo[:2] == b"\1\0")
+                or (c == 0x102E and cuerpo[:3] == b"\1\0\x09")):
+            p["visita_salida"] = ("sala", object())
+        elif c == 0x1075 or (c in (0x1012, 0x1018, 0x1024, 0x1028, 0x1046, 0x1054)
+                             and cuerpo[:2] == b"\1\0") or (c == 0x102E and cuerpo[:3] == b"\1\0\3"):
+            p["visita_salida"] = None
+        # La pantalla GM cambia sólo si el cierre pasó la guardia.
+        if c in (0x1054, 0x1075) and cuerpo[:2] == b"\1\0":
             p["pantalla_gm"] = "lobby"
         if c == 0x104F:
             p["cargando"] = ahora

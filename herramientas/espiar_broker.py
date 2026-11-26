@@ -177,17 +177,27 @@ def enviar_a(n, c, cuerpo):
 def despachar(n, resp):
     """resp: [(comando, cuerpo, ms de espera[, conexión destino])] — sin destino, a `n`.
     ★ (21-nov) por `servidor/salida.py`: lo que cortaría la carga de la stage sale después del 0x105E."""
-    try:
-        sv = servidor()
-        if sv is not None and hasattr(sv, "ordenar_salida"):
-            resp = sv.ordenar_salida(n, resp)
-    except Exception:                                         # noqa: BLE001
-        log("[oyente]  ⛔ ordenar_salida falló (se manda como antes):\n%s" % traceback.format_exc())
+    if os.path.exists(SERVIDOR):
+        from servidor import CANDADO
+        from servidor.salida import sin_stage
+        with CANDADO:
+            try:
+                resp = servidor().ordenar_salida(n, resp)
+            except Exception:                                 # noqa: BLE001
+                log("[oyente]  ⛔ ordenar_salida falló:\n%s" % traceback.format_exc())
+                resp = sin_stage(n, resp, log)
+            _despachar_ordenado(n, resp)
+    else:
+        _despachar_ordenado(n, resp)
+
+
+def _despachar_ordenado(n, resp):
     for r in resp:
         c, cuerpo, espera = r[0], r[1], r[2]
         destino = r[3] if len(r) > 3 else n
         if espera:
-            threading.Timer(espera / 1000.0, despachar, (destino, [(c, cuerpo, 0, destino)])).start()
+            pendiente = (c, cuerpo, 0, destino, *r[4:])
+            threading.Timer(espera / 1000.0, despachar, (destino, [pendiente])).start()
         else:
             enviar_a(destino, c, cuerpo)
 
@@ -200,9 +210,11 @@ def reloj():
         try:
             sv = servidor()
             if sv is not None and hasattr(sv, "tick"):
-                resp = sv.tick(sorted(CONEXIONES))
-                if resp:
-                    despachar(None, resp)
+                from servidor import CANDADO
+                with CANDADO:
+                    resp = sv.tick(sorted(CONEXIONES))
+                    if resp:
+                        despachar(None, resp)
         except Exception:                                     # noqa: BLE001
             log("[oyente]  ⛔ servidor/juego.py tick falló:\n%s" % traceback.format_exc())
             time.sleep(10)
@@ -225,30 +237,27 @@ def contestar_a(cli, n, pkt):
         CONEXIONES[n] = {"cli": cli, "clave": m["clave"], "campo2": m["campo2"],
                          "lock": (con or {}).get("lock") or threading.Lock()}
 
-    def enviar(c, cuerpo):
-        enviar_a(n, c, cuerpo)
-
     # ★ primero el SERVER CON MEMORIA (`servidor/juego.py`), si existe: se recarga solo cuando
     #   cambia el archivo, así crece sin reiniciar el espía (= sin otro UAC). Devuelve una lista
     #   de (comando, cuerpo, milisegundos de espera) o None = «no sé, que contesten las reglas».
-    resp = None
     try:
         sv = servidor()
         if sv is not None:
-            resp = sv.responder(m["comando"], m["mensaje"][4:], n)
+            from servidor import CANDADO
+            with CANDADO:
+                resp = sv.responder(m["comando"], m["mensaje"][4:], n)
+                if resp is not None:
+                    despachar(n, resp)
+                    return
     except Exception:                                         # noqa: BLE001
         log("[oyente]   #%d  ⛔ servidor/juego.py falló:\n%s" % (n, traceback.format_exc()))
-        resp = None
-    if resp is not None:
-        despachar(n, resp)
-        return
     try:
         reglas = json.load(open(REGLAS, encoding="utf-8"))
     except (OSError, ValueError):
         return
     for r in reglas.get(cmd, []):
         c, cuerpo = r.split(":", 1)
-        enviar(int(c, 16), bytes.fromhex(cuerpo))
+        despachar(n, [(int(c, 16), bytes.fromhex(cuerpo), 0)])
 
 
 SERVIDOR = os.path.join(RAIZ, "servidor", "juego.py")

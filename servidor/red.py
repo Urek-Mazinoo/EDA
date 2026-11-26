@@ -199,12 +199,15 @@ def despachar(n, resp):
         try:
             resp = juego().ordenar_salida(n, resp)
         except Exception:                                     # noqa: BLE001
-            log("⛔ ordenar_salida falló (se manda como antes):\n%s" % traceback.format_exc())
+            from servidor.salida import sin_stage
+            log("⛔ ordenar_salida falló:\n%s" % traceback.format_exc())
+            resp = sin_stage(n, resp, log)
         for r in resp:
             c, cuerpo, espera = r[0], r[1], r[2]
             destino = r[3] if len(r) > 3 else n
             if espera:
-                threading.Timer(espera / 1000.0, despachar, (destino, [(c, cuerpo, 0, destino)])).start()
+                pendiente = (c, cuerpo, 0, destino, *r[4:])
+                threading.Timer(espera / 1000.0, despachar, (destino, [pendiente])).start()
             else:
                 enviar_a(destino, c, cuerpo)
 
@@ -248,7 +251,7 @@ def contestar(cli, n, pkt, guion):
             return
     for r in guion.get("%04x" % cmd, []):
         c, cuerpo = r.split(":", 1)
-        enviar_a(n, int(c, 16), bytes.fromhex(cuerpo))
+        despachar(n, [(int(c, 16), bytes.fromhex(cuerpo), 0)])
 
 
 def atender(cli, quien, n, guion):

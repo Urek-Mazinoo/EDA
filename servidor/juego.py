@@ -87,6 +87,11 @@ def _responder(cmd, cuerpo, conexion):
     ahora = time.time()
     p.setdefault("desde", ahora)                             # (21-nov) el comienzo de ESTA sesión (red.py ya lo pone)
     p["ultimo_mensaje"] = ahora                              # (22-nov) para detectar un máster colgado en plena stage
+    if cmd in (0x1051, 0x1047, 0x104C):
+        s = SALAS.get(p.get("sala"))
+        if s:
+            for n in s["miembros"]:
+                salida.registrar_sala(s, n)
     f = MANEJADORES.get(cmd)
     antes = ASIGNADAS.get(conexion)
     r = f(cmd, cuerpo, conexion, c, p) if f else None
@@ -114,7 +119,7 @@ CAMBIAN_SALAS = (0x101D, 0x101F, 0x1045, 0x1051, 0x105A, 0x1074)   # (0x1074: sa
 
 # Las respuestas inmediatas de transición son la evidencia disponible de la pantalla del cliente.
 PANTALLAS_GM = {
-    0x1018: "lobby", 0x1046: "lobby", 0x1054: "lobby", 0x1075: "lobby",
+    0x1018: "lobby", 0x1046: "lobby",
     0x101E: "sala", 0x1020: "sala",
     0x1012: None, 0x1024: None, 0x1028: None, 0x104D: None, 0x104F: None,
 }
@@ -191,7 +196,8 @@ def _cerrada(conexion):
     VIVO.__dict__.setdefault("DESCONECTADAS", set()).discard(conexion)
     if config.PVP:                                          # (24-nov, experimental: en un duelo gana el que queda;
         for k in list(SALAS.keys()):                        #  antes de soltar la cuenta, para anotar su nombre)
-            VIVO.AVISOS_SALA = getattr(VIVO, "AVISOS_SALA", []) + duelo.desconexion(SALAS[k], conexion)
+            avisos = duelo.desconexion(SALAS[k], conexion)
+            VIVO.AVISOS_SALA = getattr(VIVO, "AVISOS_SALA", []) + salida.vincular(None, avisos)
         duelo.olvidar(conexion)
     nombre = ASIGNADAS.pop(conexion, None)
     if nombre:                                              # el aviso a sus amigos, con el tick
@@ -201,7 +207,8 @@ def _cerrada(conexion):
     #   la lista, «no listo», y el anfitrión —solo de verdad— no podía largar (cartel 0x191)
     for k in list(SALAS.keys()):
         if conexion in SALAS[k]["miembros"]:
-            VIVO.AVISOS_SALA = getattr(VIVO, "AVISOS_SALA", []) + _sacar_de_sala(SALAS[k], k, conexion)
+            avisos = _sacar_de_sala(SALAS[k], k, conexion)
+            VIVO.AVISOS_SALA = getattr(VIVO, "AVISOS_SALA", []) + salida.vincular(None, avisos)
     PARTIDAS.pop(conexion, None)
     escribir_relay()
     VIVO.LISTA_CAMBIO = True                               # salas y usuarios: uno menos

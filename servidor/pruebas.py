@@ -1024,6 +1024,7 @@ def control():
     pruebas_salir_stage(chequear)
     pruebas_ready(chequear)
     pruebas_salida_stage(chequear)
+    pruebas_paquetes_tardios(chequear)
     pruebas_lista_servidores(chequear)
     PARTIDAS.clear()
     ASIGNADAS.clear()
@@ -1329,7 +1330,7 @@ def pruebas_duelo(chequear):
     """★ (24-nov, EXPERIMENTAL) el server árbitro del duelo (servidor/duelo.py), con dos conexiones falsas.
     Lo primero: SIN EDA_PVP nada cambia (el PvE de siempre)."""
     import tempfile
-    from servidor import duelo
+    from servidor import duelo, salida
 
     A, B = 511, 512
 
@@ -1345,7 +1346,7 @@ def pruebas_duelo(chequear):
             partida(m).pop("resultado_guardado", None)
             partida(m)["game_over_en"] = None
         responder(0x1047, bytes([1, 1]), B)
-        responder(0x104E, b"", A)
+        salida.ordenar(A, responder(0x104E, b"", A))
         responder(0x105F, b"\0" * 4, A)
         responder(0x105F, b"\0" * 4, B)
         return SALAS[num]
@@ -1415,6 +1416,12 @@ def pruebas_duelo(chequear):
         r = responder(0x1064, b"\x00", A)
         fin = [x for x in r if x[0] == 0x1073]
         award = [x for x in r if x[0] == 0x1072]
+        envios = salida.ordenar(A, r)
+        for m in (A, B):
+            pendientes = [x for x in envios if x[0] == 0x1072 and x[3] == m]
+            premios = salida.ordenar(m, [(c, b, 0, d, visita) for c, b, _, d, visita in pendientes])
+            chequear("duelo: el cierre y el premio diferido pasan la guardia para #%d" % m,
+                     any(x[0] == 0x1073 and x[3] == m for x in envios) and len(premios) == 1)
         chequear("duelo: el fin del máster cierra la stage de los dos (0x1073 a cada uno)", len(fin) == 2, r)
         chequear("duelo: sin premio: el PlayEnd sin ítems y la EXP y el oro de A como antes",
                  all(x[1][25] == 0 for x in fin) and leer(A)["exp"] == exp_a and leer(A)["plata"] == oro_a,
@@ -3956,6 +3963,102 @@ def pruebas_ready(chequear):
     limpiar(601, 602, 603)
     for n in list(SALAS):
         del SALAS[n]
+
+
+def pruebas_paquetes_tardios(chequear):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from servidor import red, salida
+    from servidor.estado import VIVO
+    from servidor.partida import game_over
+    from servidor.juego import tick
+
+    a, b, c = 982, 983, 984
+    jugadores = (a, b, c)
+    enviados, temporizadores = [], []
+    avisos_antes = getattr(VIVO, "AVISOS_SALA", [])
+    VIVO.AVISOS_SALA = []
+
+    def timer(segundos, f, args):
+        return SimpleNamespace(start=lambda: temporizadores.append((segundos, f, args)))
+
+    def pedir(n, cmd, datos=b""):
+        red.despachar(n, responder(cmd, datos, n))
+
+    def recibidos(n):
+        return [cmd for destino, cmd, _ in enviados if destino == n]
+
+    sala = bytearray(0x59)
+    struct.pack_into("<I", sala, 0x28, 1011)
+    sala[0x2F] = 4
+    try:
+        with (patch.object(red, "juego", return_value=SimpleNamespace(ordenar_salida=salida.ordenar)),
+              patch.object(red, "threading", SimpleNamespace(Timer=timer)),
+              patch.object(red, "enviar_a", side_effect=lambda *x: enviados.append(x))):
+            pedir(a, 0x101D, bytes(4) + sala)
+            num = partida(a)["sala"]
+            entrada = struct.pack("<IH", 0, num) + bytes(20)
+            pedir(b, 0x101F, entrada)
+            PARTIDAS.pop(a)                     # miembro de sala sin estado de salida previo
+            pedir(b, 0x1047, b"\1\1")
+            chequear("sala de espera: recibe 1058 aunque faltaba PARTIDAS", 0x1058 in recibidos(a))
+            partida(a)["sala"] = num
+            PARTIDAS[b].pop("visita_salida")
+            pedir(a, 0x1051, b"\1")
+            chequear("sala de espera: recibe 1054 aunque faltaba la visita", 0x1054 in recibidos(b))
+
+            for n, slot in ((b, 1), (c, 2)):
+                pedir(n, 0x101F, entrada)
+                pedir(n, 0x1047, bytes([slot, 1]))
+            pedir(a, 0x104E)
+            for n in jugadores:
+                pedir(n, 0x105F, bytes(4))
+            enviados.clear()
+            red.despachar(a, game_over(leer(a), partida(a), a))
+            demora, vencer, args = temporizadores[-1]
+            pedir(a, 0x1017)
+            vencer(*args)
+            chequear("game over: tras volver al lobby se descarta el 1075 diferido",
+                     demora == 6 and 0x1018 in recibidos(a) and 0x1075 not in recibidos(a))
+            chequear("traspaso de máster: la stage recibe 1058 tipo 3",
+                     SALAS[num]["anfitrion"] == b and
+                     (b, 0x1058, struct.pack("<BHB", 0, 3, 1)) in enviados)
+
+            evento = b"OnTrigger_01"
+            pedir(b, 0x105C, struct.pack("<II", 0, len(evento)) + evento + bytes(4))
+            # 1060 no tiene productor actual. Simular un envío de grupo a través de la misma salida.
+            red.despachar(b, [(0x1060, bytes(4), 0, n) for n in jugadores])
+            pedir(b, 0x1064)
+            chequear("quien salió no recibe 1073, 1060 ni 105D",
+                     not {0x1073, 0x1060, 0x105D} & set(recibidos(a)))
+            chequear("el invitado que sigue recibe 1073, 1060 y el 105D real",
+                     {0x1073, 0x1060, 0x105D} <= set(recibidos(c)))
+            chequear("el máster que sigue recibe su 1073 y 1060",
+                     {0x1073, 0x1060} <= set(recibidos(b)))
+
+            pedir(a, 0x101D, bytes(4) + sala)
+            vencer(*args)
+            chequear("el cierre viejo no llega a la sala nueva", 0x1075 not in recibidos(a))
+            pedir(a, 0x104E)
+            vencer(*args)
+            chequear("el cierre viejo tampoco llega a la stage nueva", 0x1075 not in recibidos(a))
+            red.despachar(a, game_over(leer(a), partida(a), a))
+            _, vencer, args = temporizadores[-1]
+            vencer(*args)
+            vencer(*args)
+            chequear("dos cierres actuales producen un solo 1075", recibidos(a).count(0x1075) == 1)
+
+            # También se liga el aviso que espera hasta el próximo tick.
+            cerrada(b)
+            red.despachar(c, [(0x104F, b"", 0)])
+            enviados.clear()
+            red.despachar(None, tick([c]))
+            chequear("el 1058 encolado para la visita anterior tampoco se mezcla",
+                     0x1058 not in recibidos(c))
+    finally:
+        for n in jugadores:
+            cerrada(n)
+        VIVO.AVISOS_SALA = avisos_antes
 
 
 def pruebas_salida_stage(chequear):
